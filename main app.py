@@ -68,14 +68,12 @@ def calculate_rolling_metrics(df):
     metrics['Silver_1Y'] = metrics['Silver (India)'].pct_change(periods=252) * 100
     
     # 3-Year Rolling CAGR (Window = 756 trading days)
-    # Formula: (Price_t / Price_t-756)^(1/3) - 1
     metrics['Gold_3Y_CAGR'] = ((metrics['Gold (India)'] / metrics['Gold (India)'].shift(756))**(1/3) - 1) * 100
     metrics['Silver_3Y_CAGR'] = ((metrics['Silver (India)'] / metrics['Silver (India)'].shift(756))**(1/3) - 1) * 100
     
     return metrics
 
 def get_stats_table(series, name):
-    """Helper to generate summary stats row"""
     return {
         "Metric": name,
         "Current": series.iloc[-1],
@@ -94,96 +92,56 @@ def show_metals_dashboard():
         raw_df = fetch_metals_data()
         df_analysis = calculate_rolling_metrics(raw_df)
 
-    # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Rolling Statistics", "📈 Charts & Distribution", "📉 Drawdowns", "📅 Seasonality"])
 
     with tab1:
         st.subheader("Rolling Return Statistics")
-        st.info("This table takes **every single day's** 1-Year or 3-Year return over the last 20 years and calculates the average, minimum, and maximum.")
-        
         stats_data = []
-        # We drop NA to ensure the mean is calculated only on valid rolling periods
         stats_data.append(get_stats_table(df_analysis['Gold_1Y'].dropna(), "Gold: 1-Year Rolling Returns"))
         stats_data.append(get_stats_table(df_analysis['Silver_1Y'].dropna(), "Silver: 1-Year Rolling Returns"))
         stats_data.append(get_stats_table(df_analysis['Gold_3Y_CAGR'].dropna(), "Gold: 3-Year Rolling CAGR"))
         stats_data.append(get_stats_table(df_analysis['Silver_3Y_CAGR'].dropna(), "Silver: 3-Year Rolling CAGR"))
         
         stats_df = pd.DataFrame(stats_data).set_index("Metric")
-        
-        # Formatting for display
-        format_dict = {
-            "Current": "{:.2f}%",
-            "Average (Mean)": "{:.2f}%",
-            "Median": "{:.2f}%",
-            "Best Case (Max)": "{:.2f}%",
-            "Worst Case (Min)": "{:.2f}%",
-            "% Positive Periods": "{:.1f}%"
-        }
-        
+        format_dict = {"Current": "{:.2f}%", "Average (Mean)": "{:.2f}%", "Median": "{:.2f}%", "Best Case (Max)": "{:.2f}%", "Worst Case (Min)": "{:.2f}%", "% Positive Periods": "{:.1f}%"}
         st.dataframe(stats_df.style.format(format_dict).background_gradient(subset=["Average (Mean)"], cmap="Greens"), use_container_width=True)
 
     with tab2:
         st.subheader("Rolling Returns Visualization")
-        
         period_select = st.radio("Select Period:", ["1-Year Rolling Return", "3-Year Rolling CAGR"], horizontal=True)
         cols = ['Gold_1Y', 'Silver_1Y'] if period_select == "1-Year Rolling Return" else ['Gold_3Y_CAGR', 'Silver_3Y_CAGR']
         
-        # Line Chart
         fig_roll = go.Figure()
         colors = {'Gold': '#FFD700', 'Silver': '#C0C0C0'}
         for c in cols:
             name = c.split('_')[0]
             fig_roll.add_trace(go.Scatter(x=df_analysis.index, y=df_analysis[c], name=name, line=dict(color=colors.get(name, 'black'), width=1.5)))
-        
-        # Add Mean Lines
         for c in cols:
              name = c.split('_')[0]
              mean_val = df_analysis[c].mean()
              fig_roll.add_hline(y=mean_val, line_dash="dot", line_color=colors.get(name, 'black'), annotation_text=f"{name} Avg: {mean_val:.1f}%")
-
         fig_roll.add_hline(y=0, line_dash="solid", line_color="white")
-        fig_roll.update_layout(title="Historical Rolling Returns (Line)", xaxis_title="Date", yaxis_title="Return (%)")
         st.plotly_chart(fig_roll, use_container_width=True)
 
-        # Histogram (Distribution)
-        st.subheader("Return Distribution (Histogram)")
-        st.markdown("How likely is a certain return? This shows the frequency of returns.")
         fig_hist = go.Figure()
         for c in cols:
             name = c.split('_')[0]
             fig_hist.add_trace(go.Histogram(x=df_analysis[c], name=name, opacity=0.75, marker_color=colors.get(name, 'black')))
-        
-        fig_hist.update_layout(barmode='overlay', title="Distribution of Returns", xaxis_title="Return (%)", yaxis_title="Frequency (Days)")
+        fig_hist.update_layout(barmode='overlay', title="Distribution of Returns", xaxis_title="Return (%)", yaxis_title="Frequency")
         st.plotly_chart(fig_hist, use_container_width=True)
 
     with tab3:
         st.subheader("Drawdown Analysis")
-        
-        # Calculate Drawdowns
         dd_data = raw_df.copy()
         dd_summary = []
-        
         for c in dd_data.columns:
-            # Calculation
             peak = dd_data[c].cummax()
             dd_series = (dd_data[c] / peak - 1) * 100
             dd_data[c] = dd_series
+            dd_summary.append({"Asset": c, "Max Drawdown": dd_series.min(), "Current Drawdown": dd_series.iloc[-1], "Average Drawdown": dd_series.mean()})
             
-            # Stats for Table
-            dd_summary.append({
-                "Asset": c,
-                "Max Drawdown": dd_series.min(),
-                "Current Drawdown": dd_series.iloc[-1],
-                "Average Drawdown": dd_series.mean()
-            })
-            
-        # Drawdown Table
-        st.markdown("### Drawdown Statistics")
         dd_df = pd.DataFrame(dd_summary).set_index("Asset")
         st.dataframe(dd_df.style.format("{:.2f}%").background_gradient(cmap="Reds_r", subset=["Max Drawdown", "Current Drawdown"]), use_container_width=True)
-
-        # Drawdown Plot
-        st.markdown("### Underwater Plot")
         fig_dd = px.area(dd_data, x=dd_data.index, y=dd_data.columns, color_discrete_map={"Gold (India)": "#FFD700", "Silver (India)": "#C0C0C0"})
         st.plotly_chart(fig_dd, use_container_width=True)
 
@@ -192,12 +150,8 @@ def show_metals_dashboard():
         col_a, col_b = st.columns(2)
         def plot_heatmap(asset, ax):
             m_ret = raw_df[asset].pct_change().dropna()
-            # Group by Month and Year to get average monthly return
             grp = m_ret.groupby(m_ret.index.month).mean() * 100
-            
-            # Create a dataframe for heatmap (1 row, 12 columns)
             heatmap_data = pd.DataFrame(grp).T
-            
             sns.heatmap(heatmap_data, cmap="RdYlGn", center=0, annot=True, fmt=".2f", ax=ax, cbar=False)
             ax.set_title(asset)
             ax.set_xticklabels(['J','F','M','A','M','J','J','A','S','O','N','D'])
@@ -250,7 +204,6 @@ def load_valuation_data():
 
 def show_valuation_dashboard():
     st.title("📊 NSE Valuation Dashboard: P/E & P/B")
-    st.markdown("Comparative analysis of **Nifty 50, Midcap, Smallcap, and Total Market**.")
     
     df = load_valuation_data()
     
@@ -259,54 +212,99 @@ def show_valuation_dashboard():
         return
 
     # Configuration
-    metric_choice = st.radio("Select Metric:", ["P/E Ratio", "P/B Ratio", "Div Yield %"], horizontal=True)
+    col_ctrl1, col_ctrl2 = st.columns([1, 3])
+    with col_ctrl1:
+        metric_choice = st.radio("Select Metric:", ["P/E Ratio", "P/B Ratio", "Div Yield %"])
+    
     col_map = {"P/E Ratio": "P/E", "P/B Ratio": "P/B", "Div Yield %": "Div Yield %"}
     selected_col = col_map[metric_choice]
 
-    # Visuals
+    # --- NEW SECTION: Current vs Average Status Table ---
+    st.markdown(f"### 🚦 Valuation Status: {metric_choice}")
+    
+    # Calculate Stats per Index
+    summary_data = []
+    indices = df['Index Name'].unique()
+    
+    for idx in indices:
+        subset = df[df['Index Name'] == idx]
+        current_val = subset[selected_col].iloc[-1]
+        avg_val = subset[selected_col].mean()
+        diff_pct = ((current_val - avg_val) / avg_val) * 100
+        
+        # Determine Status
+        if selected_col == "Div Yield %":
+            # For Dividend Yield, Higher is Cheaper/Better
+            if diff_pct > 5: status = "Undervalued (High Yield) 🟢"
+            elif diff_pct < -5: status = "Overvalued (Low Yield) 🔴"
+            else: status = "Fair Value 🟡"
+        else:
+            # For P/E and P/B, Higher is Expensive
+            if diff_pct > 5: status = "Overvalued 🔴"
+            elif diff_pct < -5: status = "Undervalued 🟢"
+            else: status = "Fair Value 🟡"
+            
+        summary_data.append({
+            "Index Name": idx,
+            "Current": current_val,
+            "Historical Average": avg_val,
+            "Diff (%)": diff_pct,
+            "Valuation Status": status
+        })
+        
+    summary_df = pd.DataFrame(summary_data).set_index("Index Name")
+    
+    # Display the comparison table with highlighting
+    def highlight_status(val):
+        color = 'white'
+        if 'Overvalued' in val: color = '#ffcccc' # Light Red
+        elif 'Undervalued' in val: color = '#ccffcc' # Light Green
+        elif 'Fair' in val: color = '#fff5cc' # Light Yellow
+        return f'background-color: {color}; color: black'
+
+    st.dataframe(
+        summary_df.style.format({
+            "Current": "{:.2f}", 
+            "Historical Average": "{:.2f}", 
+            "Diff (%)": "{:+.2f}%"
+        }).applymap(highlight_status, subset=['Valuation Status']),
+        use_container_width=True
+    )
+    
+    st.divider()
+
+    # Visuals Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📅 Monthly Historical Data", "📈 Trend Analysis", "📊 Relative Value", "📉 Matrix"])
     
     with tab1:
         st.subheader(f"📅 Monthly {metric_choice} Data Table")
         
-        # Add Month/Year Columns
         df['Year'] = df['Date'].dt.year
-        df['Month'] = df['Date'].dt.month_name().str[:3] # Jan, Feb, Mar
+        df['Month'] = df['Date'].dt.month_name().str[:3]
         
-        # Dropdown to select which index to view
-        unique_indices = df['Index Name'].unique()
-        selected_index = st.selectbox("Select Index for Tabular View:", unique_indices)
-        
-        # Filter Data
+        selected_index = st.selectbox("Select Index for Tabular View:", indices)
         subset = df[df['Index Name'] == selected_index]
         
-        # Pivot Table: Year vs Month
-        # We take the mean of the metric for that month
         pivot_table = subset.groupby(['Year', 'Month'])[selected_col].mean().reset_index()
-        
-        # Sort months correctly
         months_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         pivot_table['Month'] = pd.Categorical(pivot_table['Month'], categories=months_order, ordered=True)
-        
-        # Pivot
         final_table = pivot_table.pivot(index='Year', columns='Month', values=selected_col)
         
         st.write(f"**Average Monthly {metric_choice} for {selected_index}**")
         st.dataframe(final_table.style.format("{:.2f}").background_gradient(cmap="YlOrRd"), use_container_width=True)
-        
-        with st.expander("View Raw Daily Data"):
-            st.dataframe(subset[['Date', 'Index Name', 'P/E', 'P/B', 'Div Yield %']].sort_values('Date', ascending=False), use_container_width=True)
 
     with tab2:
         fig = px.line(df, x='Date', y=selected_col, color='Index Name', title=f"{metric_choice} Trend")
+        # Add average lines
+        for idx in indices:
+            avg = df[df['Index Name'] == idx][selected_col].mean()
+            # We don't plot lines here to avoid clutter, but you can see them in the status table
         st.plotly_chart(fig, use_container_width=True)
         
     with tab3:
-        summary = df.groupby('Index Name')[selected_col].agg(['last', 'mean']).reset_index()
-        summary.columns = ['Index', 'Current', 'Average']
-        summary['% Diff'] = ((summary['Current'] - summary['Average']) / summary['Average']) * 100
-        
-        fig_bar = px.bar(summary, x='Index', y='% Diff', color='% Diff', color_continuous_scale="RdYlGn_r", title="Premium/Discount vs Avg")
+        # Re-using the summary df for the bar chart
+        fig_bar = px.bar(summary_df.reset_index(), x='Index Name', y='Diff (%)', color='Diff (%)', 
+                         color_continuous_scale="RdYlGn_r", title="Premium/Discount vs Historical Average (%)")
         st.plotly_chart(fig_bar, use_container_width=True)
         
     with tab4:
@@ -325,7 +323,7 @@ def main():
     app_mode = st.sidebar.radio("Go To:", ["Precious Metals (Gold/Silver)", "NSE Valuations (P/E & P/B)"])
     
     st.sidebar.divider()
-    st.sidebar.info("**About:**\n\n1. **Metals:** Rolling Returns Mean/Max/Min.\n2. **Valuations:** Monthly P/E Tables.")
+    st.sidebar.info("**About:**\n\n1. **Metals:** Rolling Returns Mean/Max/Min.\n2. **Valuations:** Overvalued/Undervalued Status.")
     
     if app_mode == "Precious Metals (Gold/Silver)":
         show_metals_dashboard()
