@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-# --- 1. GLOBAL PAGE CONFIGURATION (Must be at the very top) ---
+# --- 1. GLOBAL PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="Pro Market Intelligence Super-App", 
     layout="wide", 
@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 # ==========================================
-#  MODULE 1: PRECIOUS METALS (Logic from data.py)
+#  MODULE 1: PRECIOUS METALS (Gold vs Silver)
 # ==========================================
 
 def get_gold_tax_multiplier(date):
@@ -40,7 +40,8 @@ def clean_outliers(df, col_name, threshold=0.10):
 
 @st.cache_data
 def fetch_metals_data():
-    tickers = ['GOLDBEES.NS', 'SI=F', 'INR=X', '^NSEI']
+    # Removed ^NSEI (Nifty) from fetch
+    tickers = ['GOLDBEES.NS', 'SI=F', 'INR=X']
     data = yf.download(tickers, period="20y", interval="1d")['Close']
     data.ffill(inplace=True)
     data.dropna(inplace=True)
@@ -58,26 +59,35 @@ def fetch_metals_data():
     tax_series = common_index.to_series().apply(get_gold_tax_multiplier)
     df['Silver (India)'] = si_price * inr_price * 32.15 * tax_series
     
-    # Nifty
-    df['Nifty 50'] = data.loc[common_index, '^NSEI']
     df.dropna(inplace=True)
     return df
 
 def calculate_rolling_metrics(df):
     metrics = df.copy()
-    # 1-Year
+    # 1-Year (252 trading days)
     metrics['Gold_1Y'] = metrics['Gold (India)'].pct_change(periods=252) * 100
     metrics['Silver_1Y'] = metrics['Silver (India)'].pct_change(periods=252) * 100
-    metrics['Nifty_1Y'] = metrics['Nifty 50'].pct_change(periods=252) * 100
-    # 3-Year
+    
+    # 3-Year CAGR (756 trading days)
     metrics['Gold_3Y_CAGR'] = ((metrics['Gold (India)'] / metrics['Gold (India)'].shift(756))**(1/3) - 1) * 100
     metrics['Silver_3Y_CAGR'] = ((metrics['Silver (India)'] / metrics['Silver (India)'].shift(756))**(1/3) - 1) * 100
-    metrics['Nifty_3Y_CAGR'] = ((metrics['Nifty 50'] / metrics['Nifty 50'].shift(756))**(1/3) - 1) * 100
+    
     return metrics
+
+def get_stats_table(series, name):
+    """Helper to generate summary stats row"""
+    return {
+        "Asset": name,
+        "Current": series.iloc[-1],
+        "Mean": series.mean(),
+        "Median": series.median(),
+        "Max": series.max(),
+        "Min": series.min()
+    }
 
 def show_metals_dashboard():
     st.title("✨ Pro Quant Dashboard: Gold vs. Silver")
-    st.markdown("Analysis with **Outlier Removal** and **Synthetic Tax Calculations**.")
+    st.markdown("Deep-dive analysis of Precious Metals (excluding Equity markets).")
 
     with st.spinner('Fetching & Cleaning market data...'):
         raw_df = fetch_metals_data()
@@ -89,40 +99,79 @@ def show_metals_dashboard():
     gold_cagr = (raw_df['Gold (India)'].iloc[-1] / raw_df['Gold (India)'].iloc[0])**(1/years) - 1
     silver_cagr = (raw_df['Silver (India)'].iloc[-1] / raw_df['Silver (India)'].iloc[0])**(1/years) - 1
 
-    with col1: st.metric("Gold CAGR", f"{gold_cagr*100:.2f}%")
-    with col2: st.metric("Silver CAGR", f"{silver_cagr*100:.2f}%")
+    with col1: st.metric("Gold CAGR (Long Term)", f"{gold_cagr*100:.2f}%")
+    with col2: st.metric("Silver CAGR (Long Term)", f"{silver_cagr*100:.2f}%")
     with col3: st.metric("Gold 3Y Return (Curr)", f"{df_analysis['Gold_3Y_CAGR'].iloc[-1]:.2f}%")
     with col4: st.metric("Silver 3Y Return (Curr)", f"{df_analysis['Silver_3Y_CAGR'].iloc[-1]:.2f}%")
 
     st.divider()
 
     # Tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Wealth Index", "🔄 Rolling Returns", "📉 Drawdowns", "📅 Seasonality"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Wealth Index", "📊 Statistics & Tables", "📉 Drawdowns", "📅 Seasonality"])
 
     with tab1:
         st.subheader("Growth of ₹100")
         normalized = (raw_df / raw_df.iloc[0]) * 100
-        fig_norm = px.line(normalized, x=normalized.index, y=normalized.columns)
+        fig_norm = px.line(normalized, x=normalized.index, y=normalized.columns, color_discrete_map={"Gold (India)": "#FFD700", "Silver (India)": "#C0C0C0"})
         st.plotly_chart(fig_norm, use_container_width=True)
 
     with tab2:
-        st.subheader("Rolling Returns Analysis")
+        st.subheader("Detailed Statistical Analysis")
+        
+        # 1. Rolling Returns Table
+        st.markdown("### 1. Rolling Returns Statistics (%)")
+        
+        stats_data = []
+        stats_data.append(get_stats_table(df_analysis['Gold_1Y'].dropna(), "Gold 1Y Rolling"))
+        stats_data.append(get_stats_table(df_analysis['Silver_1Y'].dropna(), "Silver 1Y Rolling"))
+        stats_data.append(get_stats_table(df_analysis['Gold_3Y_CAGR'].dropna(), "Gold 3Y CAGR"))
+        stats_data.append(get_stats_table(df_analysis['Silver_3Y_CAGR'].dropna(), "Silver 3Y CAGR"))
+        
+        stats_df = pd.DataFrame(stats_data).set_index("Asset")
+        st.dataframe(stats_df.style.format("{:.2f}%").background_gradient(cmap="Greens", axis=0), use_container_width=True)
+
+        # 2. Visual Rolling Returns
+        st.markdown("### 2. Rolling Returns Visualization")
         period_select = st.radio("Select Period:", ["1-Year Rolling Return", "3-Year Rolling CAGR"], horizontal=True)
-        cols = ['Gold_1Y', 'Silver_1Y', 'Nifty_1Y'] if period_select == "1-Year Rolling Return" else ['Gold_3Y_CAGR', 'Silver_3Y_CAGR', 'Nifty_3Y_CAGR']
+        cols = ['Gold_1Y', 'Silver_1Y'] if period_select == "1-Year Rolling Return" else ['Gold_3Y_CAGR', 'Silver_3Y_CAGR']
+        
         fig_roll = go.Figure()
-        colors = {'Gold': '#FFD700', 'Silver': '#C0C0C0', 'Nifty': '#0000FF'}
+        colors = {'Gold': '#FFD700', 'Silver': '#C0C0C0'}
         for c in cols:
             name = c.split('_')[0]
             fig_roll.add_trace(go.Scatter(x=df_analysis.index, y=df_analysis[c], name=name, line=dict(color=colors.get(name, 'black'), width=1.5)))
-        fig_roll.add_hline(y=0, line_dash="dash", line_color="black")
+        fig_roll.add_hline(y=0, line_dash="dash", line_color="white")
         st.plotly_chart(fig_roll, use_container_width=True)
 
     with tab3:
-        st.subheader("Underwater Plot (Risk)")
+        st.subheader("Drawdown Analysis")
+        
+        # Calculate Drawdowns
         dd_data = raw_df.copy()
+        dd_summary = []
+        
         for c in dd_data.columns:
-            dd_data[c] = (dd_data[c] / dd_data[c].cummax() - 1) * 100
-        fig_dd = px.area(dd_data, x=dd_data.index, y=dd_data.columns)
+            # Calculation
+            peak = dd_data[c].cummax()
+            dd_series = (dd_data[c] / peak - 1) * 100
+            dd_data[c] = dd_series
+            
+            # Stats for Table
+            dd_summary.append({
+                "Asset": c,
+                "Max Drawdown": dd_series.min(),
+                "Current Drawdown": dd_series.iloc[-1],
+                "Average Drawdown": dd_series.mean()
+            })
+            
+        # Drawdown Table
+        st.markdown("### Drawdown Statistics")
+        dd_df = pd.DataFrame(dd_summary).set_index("Asset")
+        st.dataframe(dd_df.style.format("{:.2f}%").background_gradient(cmap="Reds_r", subset=["Max Drawdown", "Current Drawdown"]), use_container_width=True)
+
+        # Drawdown Plot
+        st.markdown("### Underwater Plot")
+        fig_dd = px.area(dd_data, x=dd_data.index, y=dd_data.columns, color_discrete_map={"Gold (India)": "#FFD700", "Silver (India)": "#C0C0C0"})
         st.plotly_chart(fig_dd, use_container_width=True)
 
     with tab4:
@@ -130,8 +179,13 @@ def show_metals_dashboard():
         col_a, col_b = st.columns(2)
         def plot_heatmap(asset, ax):
             m_ret = raw_df[asset].pct_change().dropna()
+            # Group by Month and Year to get average monthly return
             grp = m_ret.groupby(m_ret.index.month).mean() * 100
-            sns.heatmap(pd.DataFrame(grp).T, cmap="RdYlGn", center=0, annot=True, fmt=".2f", ax=ax, cbar=False)
+            
+            # Create a dataframe for heatmap (1 row, 12 columns)
+            heatmap_data = pd.DataFrame(grp).T
+            
+            sns.heatmap(heatmap_data, cmap="RdYlGn", center=0, annot=True, fmt=".2f", ax=ax, cbar=False)
             ax.set_title(asset)
             ax.set_xticklabels(['J','F','M','A','M','J','J','A','S','O','N','D'])
             ax.set_yticklabels([])
@@ -210,7 +264,7 @@ def show_valuation_dashboard():
     st.dataframe(summary.style.format({'Current':'{:.2f}', 'Average':'{:.2f}', 'Min':'{:.2f}', 'Max':'{:.2f}', 'Volatility':'{:.2f}'}).background_gradient(subset=['Current'], cmap="Reds"), use_container_width=True)
 
     # Visuals
-    tab1, tab2, tab3 = st.tabs(["📈 Trend Analysis", "📊 Relative Value", "📉 Matrix"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Trend Analysis", "📊 Relative Value", "📉 Matrix", "📅 Monthly Historical Data"])
     
     with tab1:
         fig = px.line(df, x='Date', y=selected_col, color='Index Name', title=f"{metric_choice} Trend")
@@ -229,9 +283,40 @@ def show_valuation_dashboard():
         fig_scat.add_hline(y=latest['P/B'].mean(), line_dash="dash")
         st.plotly_chart(fig_scat, use_container_width=True)
 
+    with tab4:
+        st.subheader(f"📅 Monthly {metric_choice} Data")
+        
+        # Add Month/Year Columns
+        df['Year'] = df['Date'].dt.year
+        df['Month'] = df['Date'].dt.month_name().str[:3] # Jan, Feb, Mar
+        
+        # Dropdown to select which index to view
+        unique_indices = df['Index Name'].unique()
+        selected_index = st.selectbox("Select Index for Tabular View:", unique_indices)
+        
+        # Filter Data
+        subset = df[df['Index Name'] == selected_index]
+        
+        # Pivot Table: Year vs Month
+        # We take the mean of the metric for that month
+        pivot_table = subset.groupby(['Year', 'Month'])[selected_col].mean().reset_index()
+        
+        # Sort months correctly
+        months_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        pivot_table['Month'] = pd.Categorical(pivot_table['Month'], categories=months_order, ordered=True)
+        
+        # Pivot
+        final_table = pivot_table.pivot(index='Year', columns='Month', values=selected_col)
+        
+        st.write(f"**Average Monthly {metric_choice} for {selected_index}**")
+        st.dataframe(final_table.style.format("{:.2f}").background_gradient(cmap="YlOrRd"), use_container_width=True)
+        
+        with st.expander("View Raw Daily Data"):
+            st.dataframe(subset[['Date', 'Index Name', 'P/E', 'P/B', 'Div Yield %']].sort_values('Date', ascending=False), use_container_width=True)
+
 
 # ==========================================
-#  MAIN APP CONTROLLER (The Switcher)
+#  MAIN APP CONTROLLER
 # ==========================================
 
 def main():
@@ -239,7 +324,7 @@ def main():
     app_mode = st.sidebar.radio("Go To:", ["Precious Metals (Gold/Silver)", "NSE Valuations (P/E & P/B)"])
     
     st.sidebar.divider()
-    st.sidebar.info("**About:**\n\n1. **Metals:** Real-time + Synthetic data via Yahoo Finance.\n2. **Valuations:** Historical data via NSE CSV dumps.")
+    st.sidebar.info("**About:**\n\n1. **Metals:** Focused Gold/Silver Analysis.\n2. **Valuations:** NSE Indices Historical Data.")
     
     if app_mode == "Precious Metals (Gold/Silver)":
         show_metals_dashboard()
