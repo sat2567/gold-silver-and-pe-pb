@@ -175,8 +175,10 @@ def load_valuation_data():
     files = {
         "Nifty 50 (2025)": "NIFTY 50_Historical_PE_PB_DIV_Data_01012025to01012026.csv",
         "Nifty Midcap 150 (2025)": "NIFTY MIDCAP 150_Historical_PE_PB_DIV_Data_01012025to01012026.csv",
-        "Nifty Smallcap 100 (2025)": "NIFTY SMALLCAP 100_Historical_PE_PB_DIV_Data_01012025to01012026.csv",
+        # CHANGED: Removed Smallcap 100, Added Smallcap 250 for 2025
+        "Nifty Smallcap 250 (2025)": "NIFTY SMALLCAP 250_Historical_PE_PB_DIV_Data_01012025to01012026.csv",
         "Nifty Total Market (2025)": "NIFTY TOTAL MARKET_Historical_PE_PB_DIV_Data_01012025to01012026.csv",
+        
         "Nifty 50 (2024)": "NIFTY 50_Historical_PE_PB_DIV_Data_01012024to31122024.csv",
         "Nifty Midcap 150 (2024)": "NIFTY MIDCAP 150_Historical_PE_PB_DIV_Data_01012024to31122024.csv",
         "Nifty Smallcap 250 (2024)": "NIFTY SMALLCAP 250_Historical_PE_PB_DIV_Data_01012024to31122024.csv",
@@ -213,122 +215,3 @@ def show_valuation_dashboard():
 
     # Configuration
     col_ctrl1, col_ctrl2 = st.columns([1, 3])
-    with col_ctrl1:
-        metric_choice = st.radio("Select Metric:", ["P/E Ratio", "P/B Ratio", "Div Yield %"])
-    
-    col_map = {"P/E Ratio": "P/E", "P/B Ratio": "P/B", "Div Yield %": "Div Yield %"}
-    selected_col = col_map[metric_choice]
-
-    # --- NEW SECTION: Current vs Average Status Table ---
-    st.markdown(f"### 🚦 Valuation Status: {metric_choice}")
-    
-    # Calculate Stats per Index
-    summary_data = []
-    indices = df['Index Name'].unique()
-    
-    for idx in indices:
-        subset = df[df['Index Name'] == idx]
-        current_val = subset[selected_col].iloc[-1]
-        avg_val = subset[selected_col].mean()
-        diff_pct = ((current_val - avg_val) / avg_val) * 100
-        
-        # Determine Status
-        if selected_col == "Div Yield %":
-            # For Dividend Yield, Higher is Cheaper/Better
-            if diff_pct > 5: status = "Undervalued (High Yield) 🟢"
-            elif diff_pct < -5: status = "Overvalued (Low Yield) 🔴"
-            else: status = "Fair Value 🟡"
-        else:
-            # For P/E and P/B, Higher is Expensive
-            if diff_pct > 5: status = "Overvalued 🔴"
-            elif diff_pct < -5: status = "Undervalued 🟢"
-            else: status = "Fair Value 🟡"
-            
-        summary_data.append({
-            "Index Name": idx,
-            "Current": current_val,
-            "Historical Average": avg_val,
-            "Diff (%)": diff_pct,
-            "Valuation Status": status
-        })
-        
-    summary_df = pd.DataFrame(summary_data).set_index("Index Name")
-    
-    # Display the comparison table with highlighting
-    def highlight_status(val):
-        color = 'white'
-        if 'Overvalued' in val: color = '#ffcccc' # Light Red
-        elif 'Undervalued' in val: color = '#ccffcc' # Light Green
-        elif 'Fair' in val: color = '#fff5cc' # Light Yellow
-        return f'background-color: {color}; color: black'
-
-    st.dataframe(
-        summary_df.style.format({
-            "Current": "{:.2f}", 
-            "Historical Average": "{:.2f}", 
-            "Diff (%)": "{:+.2f}%"
-        }).applymap(highlight_status, subset=['Valuation Status']),
-        use_container_width=True
-    )
-    
-    st.divider()
-
-    # Visuals Tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📅 Monthly Historical Data", "📈 Trend Analysis", "📊 Relative Value", "📉 Matrix"])
-    
-    with tab1:
-        st.subheader(f"📅 Monthly {metric_choice} Data Table")
-        
-        df['Year'] = df['Date'].dt.year
-        df['Month'] = df['Date'].dt.month_name().str[:3]
-        
-        selected_index = st.selectbox("Select Index for Tabular View:", indices)
-        subset = df[df['Index Name'] == selected_index]
-        
-        pivot_table = subset.groupby(['Year', 'Month'])[selected_col].mean().reset_index()
-        months_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        pivot_table['Month'] = pd.Categorical(pivot_table['Month'], categories=months_order, ordered=True)
-        final_table = pivot_table.pivot(index='Year', columns='Month', values=selected_col)
-        
-        st.write(f"**Average Monthly {metric_choice} for {selected_index}**")
-        st.dataframe(final_table.style.format("{:.2f}").background_gradient(cmap="YlOrRd"), use_container_width=True)
-
-    with tab2:
-        fig = px.line(df, x='Date', y=selected_col, color='Index Name', title=f"{metric_choice} Trend")
-        # Add average lines
-        for idx in indices:
-            avg = df[df['Index Name'] == idx][selected_col].mean()
-            # We don't plot lines here to avoid clutter, but you can see them in the status table
-        st.plotly_chart(fig, use_container_width=True)
-        
-    with tab3:
-        # Re-using the summary df for the bar chart
-        fig_bar = px.bar(summary_df.reset_index(), x='Index Name', y='Diff (%)', color='Diff (%)', 
-                         color_continuous_scale="RdYlGn_r", title="Premium/Discount vs Historical Average (%)")
-        st.plotly_chart(fig_bar, use_container_width=True)
-        
-    with tab4:
-        latest = df.groupby('Index Name').tail(1)
-        fig_scat = px.scatter(latest, x='P/E', y='P/B', color='Index Name', size='P/E', text='Index Name', title="Risk vs Value Matrix")
-        fig_scat.add_vline(x=latest['P/E'].mean(), line_dash="dash")
-        fig_scat.add_hline(y=latest['P/B'].mean(), line_dash="dash")
-        st.plotly_chart(fig_scat, use_container_width=True)
-
-# ==========================================
-#  MAIN APP CONTROLLER
-# ==========================================
-
-def main():
-    st.sidebar.title("🚀 Navigation")
-    app_mode = st.sidebar.radio("Go To:", ["Precious Metals (Gold/Silver)", "NSE Valuations (P/E & P/B)"])
-    
-    st.sidebar.divider()
-    st.sidebar.info("**About:**\n\n1. **Metals:** Rolling Returns Mean/Max/Min.\n2. **Valuations:** Overvalued/Undervalued Status.")
-    
-    if app_mode == "Precious Metals (Gold/Silver)":
-        show_metals_dashboard()
-    elif app_mode == "NSE Valuations (P/E & P/B)":
-        show_valuation_dashboard()
-
-if __name__ == "__main__":
-    main()
