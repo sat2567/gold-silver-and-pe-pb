@@ -217,20 +217,20 @@ def show_metals_dashboard():
 def discover_csv_files(search_dirs=None):
     """
     Auto-discover all Nifty valuation CSV files from multiple directories.
-    Matches any file with 'Historical_PE_PB_DIV_Data' in its name.
+    Matches any file with 'Historical_PE_PB_DIV_Data' or '_PE_PB_DIV' in its name.
     """
     if search_dirs is None:
         search_dirs = ["."]
     
     found_files = []
     for directory in search_dirs:
-        pattern = os.path.join(directory, "*Historical_PE_PB_DIV_Data*.csv")
-        found_files.extend(glob.glob(pattern))
-    
-    # Also try NIFTY* pattern for older naming conventions
-    for directory in search_dirs:
-        pattern = os.path.join(directory, "NIFTY*_PE_PB_DIV*.csv")
-        found_files.extend(glob.glob(pattern))
+        # Match both naming conventions
+        for pattern in [
+            "*Historical_PE_PB_DIV_Data*.csv",
+            "*_Historical_PE_PB_DIV_Data_*.csv",
+            "NIFTY*_PE_PB_DIV*.csv",
+        ]:
+            found_files.extend(glob.glob(os.path.join(directory, pattern)))
     
     found_files = list(set(found_files))
     return sorted(found_files)
@@ -244,7 +244,7 @@ def parse_single_csv(filepath):
     try:
         df = pd.read_csv(filepath)
         # Clean column names (remove quotes and extra whitespace)
-        df.columns = df.columns.str.strip().str.replace('"', '')
+        df.columns = df.columns.str.strip().str.replace('"', '', regex=False)
         
         # Ensure required columns exist
         required_cols = {'P/E', 'P/B'}
@@ -253,10 +253,10 @@ def parse_single_csv(filepath):
         
         # Standardize the index name column
         if 'IndexName' in df.columns:
-            df['Index Name'] = df['IndexName'].str.strip().str.replace('"', '')
+            df['Index Name'] = df['IndexName'].str.strip().str.replace('"', '', regex=False)
             df.drop(columns=['IndexName'], inplace=True, errors='ignore')
         elif 'Index Name' in df.columns:
-            df['Index Name'] = df['Index Name'].str.strip().str.replace('"', '')
+            df['Index Name'] = df['Index Name'].str.strip().str.replace('"', '', regex=False)
         else:
             # Infer from filename: "NIFTY_50_Historical..." -> "NIFTY 50"
             basename = os.path.basename(filepath)
@@ -265,7 +265,7 @@ def parse_single_csv(filepath):
         
         # Parse dates (handle multiple formats like "22 Apr 2026" or "01-01-2025")
         if 'Date' in df.columns:
-            df['Date'] = df['Date'].astype(str).str.strip().str.replace('"', '')
+            df['Date'] = df['Date'].astype(str).str.strip().str.replace('"', '', regex=False)
             df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True)
         else:
             return pd.DataFrame()
@@ -274,7 +274,7 @@ def parse_single_csv(filepath):
         for col in ['P/E', 'P/B', 'Div Yield %']:
             if col in df.columns:
                 df[col] = pd.to_numeric(
-                    df[col].astype(str).str.strip().str.replace('"', ''), 
+                    df[col].astype(str).str.strip().str.replace('"', '', regex=False), 
                     errors='coerce'
                 )
         
@@ -283,7 +283,7 @@ def parse_single_csv(filepath):
         
         return df[['Date', 'Index Name', 'P/E', 'P/B', 'Div Yield %']].dropna(subset=['Date', 'P/E', 'P/B'])
     
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
 
@@ -329,7 +329,7 @@ def load_valuation_data():
     # Deduplicate: same (Index Name, Date) from multiple files — keep latest
     combined_df.drop_duplicates(subset=['Index Name', 'Date'], keep='last', inplace=True)
     
-    # Sort chronologically
+    # CRITICAL: Sort the ENTIRE dataset so timeline is correct (2024 -> 2025 -> 2026)
     combined_df.sort_values(by=['Index Name', 'Date'], ascending=[True, True], inplace=True)
     combined_df.reset_index(drop=True, inplace=True)
     
@@ -344,6 +344,7 @@ def load_valuation_data():
 
 def show_valuation_dashboard():
     st.title("📊 NSE Valuation Dashboard: P/E & P/B")
+    st.markdown("Comparative analysis of **Nifty 50, Midcap 150, Smallcap 250, and Total Market**.")
     
     df = load_valuation_data()
     
@@ -356,7 +357,7 @@ def show_valuation_dashboard():
         )
         return
 
-    # Configuration
+    # --- METRIC SELECTION ---
     col_ctrl1, col_ctrl2 = st.columns([1, 3])
     with col_ctrl1:
         metric_choice = st.radio("Select Metric:", ["P/E Ratio", "P/B Ratio", "Div Yield %"])
@@ -364,67 +365,76 @@ def show_valuation_dashboard():
     col_map = {"P/E Ratio": "P/E", "P/B Ratio": "P/B", "Div Yield %": "Div Yield %"}
     selected_col = col_map[metric_choice]
 
-    # Status Table
-    st.markdown(f"### 🚦 Valuation Status: {metric_choice}")
-    summary_data = []
-    indices = df['Index Name'].unique()
+    # --- SUMMARY TABLE (using groupby agg for robustness) ---
+    st.markdown(f"### 📋 Valuation Summary: {metric_choice}")
     
-    for idx in indices:
-        subset = df[df['Index Name'] == idx]
-        current_val = subset[selected_col].iloc[-1]
-        avg_val = subset[selected_col].mean()
-        diff_pct = ((current_val - avg_val) / avg_val) * 100
-        
-        latest_date = subset['Date'].max().strftime('%d-%b-%Y')
-        earliest_date = subset['Date'].min().strftime('%d-%b-%Y')
-        
+    # Since data is globally sorted by Date, .last() correctly grabs the latest value
+    summary = df.groupby('Index Name')[selected_col].agg(
+        ['last', 'mean', 'min', 'max', 'std']
+    ).reset_index()
+    summary.columns = ['Index', 'Current', 'Average', 'Min', 'Max', 'Volatility']
+    
+    # Compute % difference from average
+    summary['% vs Avg'] = ((summary['Current'] - summary['Average']) / summary['Average']) * 100
+    
+    # Valuation status logic
+    def get_status(row):
+        diff = row['% vs Avg']
         if selected_col == "Div Yield %":
-            if diff_pct > 5: status = "Undervalued (High Yield) 🟢"
-            elif diff_pct < -5: status = "Overvalued (Low Yield) 🔴"
-            else: status = "Fair Value 🟡"
+            # For dividend yield, higher = cheaper
+            if diff > 5: return "Undervalued (High Yield) 🟢"
+            elif diff < -5: return "Overvalued (Low Yield) 🔴"
+            else: return "Fair Value 🟡"
         else:
-            if diff_pct > 5: status = "Overvalued 🔴"
-            elif diff_pct < -5: status = "Undervalued 🟢"
-            else: status = "Fair Value 🟡"
-            
-        summary_data.append({
-            "Index Name": idx,
-            "Current": current_val,
-            "Historical Average": avg_val,
-            "Diff (%)": diff_pct,
-            "Valuation Status": status,
-            "Data Range": f"{earliest_date} → {latest_date}",
-            "Data Points": len(subset),
-        })
-        
-    summary_df = pd.DataFrame(summary_data).set_index("Index Name")
+            if diff > 5: return "Expensive 🔴"
+            elif diff < -5: return "Cheap 🟢"
+            else: return "Fair 🟡"
     
+    summary['Status'] = summary.apply(get_status, axis=1)
+    
+    # Add date range info per index
+    date_ranges = df.groupby('Index Name')['Date'].agg(['min', 'max', 'count']).reset_index()
+    date_ranges.columns = ['Index', 'From', 'To', 'Data Points']
+    date_ranges['From'] = date_ranges['From'].dt.strftime('%d-%b-%Y')
+    date_ranges['To'] = date_ranges['To'].dt.strftime('%d-%b-%Y')
+    summary = summary.merge(date_ranges, on='Index', how='left')
+    
+    # Color the status column
     def highlight_status(val):
         color = 'white'
-        if 'Overvalued' in val: color = '#ffcccc' 
-        elif 'Undervalued' in val: color = '#ccffcc'
-        elif 'Fair' in val: color = '#fff5cc'
+        if isinstance(val, str):
+            if 'Expensive' in val or 'Overvalued' in val: color = '#ffcccc'
+            elif 'Cheap' in val or 'Undervalued' in val: color = '#ccffcc'
+            elif 'Fair' in val: color = '#fff5cc'
         return f'background-color: {color}; color: black'
-
+    
+    display_summary = summary.set_index('Index')
     st.dataframe(
-        summary_df.style.format({
-            "Current": "{:.2f}", 
-            "Historical Average": "{:.2f}", 
-            "Diff (%)": "{:+.2f}%"
-        }).applymap(highlight_status, subset=['Valuation Status']),
+        display_summary.style.format({
+            'Current': '{:.2f}', 'Average': '{:.2f}', 
+            'Min': '{:.2f}', 'Max': '{:.2f}', 
+            'Volatility': '{:.2f}', '% vs Avg': '{:+.2f}%'
+        }).map(highlight_status, subset=['Status']
+        ).background_gradient(subset=['Current'], cmap="Reds"),
         use_container_width=True
     )
     
     st.divider()
+    indices = df['Index Name'].unique()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📅 Monthly Historical Data", "📈 Trend Analysis", "📊 Relative Value", "📉 Matrix"])
+    # --- TABS ---
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📅 Monthly Historical Data", "📈 Trend Analysis", 
+        "📊 Relative Value", "📉 Matrix"
+    ])
     
     with tab1:
         st.subheader(f"📅 Monthly {metric_choice} Data Table")
-        df['Year'] = df['Date'].dt.year
-        df['Month'] = df['Date'].dt.month_name().str[:3]
+        df_tab = df.copy()
+        df_tab['Year'] = df_tab['Date'].dt.year
+        df_tab['Month'] = df_tab['Date'].dt.month_name().str[:3]
         selected_index = st.selectbox("Select Index for Tabular View:", indices)
-        subset = df[df['Index Name'] == selected_index]
+        subset = df_tab[df_tab['Index Name'] == selected_index]
         pivot_table = subset.groupby(['Year', 'Month'])[selected_col].mean().reset_index()
         months_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         pivot_table['Month'] = pd.Categorical(pivot_table['Month'], categories=months_order, ordered=True)
@@ -433,19 +443,32 @@ def show_valuation_dashboard():
         st.dataframe(final_table.style.format("{:.2f}").background_gradient(cmap="YlOrRd"), use_container_width=True)
 
     with tab2:
-        fig = px.line(df, x='Date', y=selected_col, color='Index Name', title=f"{metric_choice} Trend")
+        st.subheader(f"Historical Trend")
+        fig = px.line(df, x='Date', y=selected_col, color='Index Name', 
+                      title=f"{metric_choice} Trend", height=500)
+        fig.update_layout(hovermode="x unified", yaxis_title=metric_choice)
         st.plotly_chart(fig, use_container_width=True)
         
     with tab3:
-        fig_bar = px.bar(summary_df.reset_index(), x='Index Name', y='Diff (%)', color='Diff (%)', 
-                         color_continuous_scale="RdYlGn_r", title="Premium/Discount vs Historical Average (%)")
+        st.subheader("Premium/Discount vs Historical Average")
+        bar_data = summary.copy()
+        fig_bar = px.bar(bar_data, x='Index', y='% vs Avg', color='% vs Avg',
+                         color_continuous_scale="RdYlGn_r", 
+                         title="Premium/Discount vs Historical Average (%)")
+        fig_bar.add_hline(y=0, line_color="black")
         st.plotly_chart(fig_bar, use_container_width=True)
         
     with tab4:
+        st.subheader("Valuation Matrix (Current P/E vs P/B)")
         latest = df.groupby('Index Name').tail(1)
-        fig_scat = px.scatter(latest, x='P/E', y='P/B', color='Index Name', size='P/E', text='Index Name', title="Risk vs Value Matrix")
-        fig_scat.add_vline(x=latest['P/E'].mean(), line_dash="dash")
-        fig_scat.add_hline(y=latest['P/B'].mean(), line_dash="dash")
+        fig_scat = px.scatter(latest, x='P/E', y='P/B', color='Index Name', 
+                              size='P/E', text='Index Name', 
+                              title="Risk vs Value Matrix")
+        avg_pe = latest['P/E'].mean()
+        avg_pb = latest['P/B'].mean()
+        fig_scat.add_vline(x=avg_pe, line_dash="dash", line_color="grey")
+        fig_scat.add_hline(y=avg_pb, line_dash="dash", line_color="grey")
+        fig_scat.update_traces(textposition='top center')
         st.plotly_chart(fig_scat, use_container_width=True)
 
 # ==========================================
