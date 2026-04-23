@@ -155,9 +155,9 @@ def main():
     st.markdown(f"### 📋 Valuation Summary: {metric_choice}")
 
     summary = df.groupby('Index Name')[selected_col].agg(
-        ['last', 'mean', 'min', 'max', 'std']
+        ['last', 'mean', 'median', 'min', 'max', 'std']
     ).reset_index()
-    summary.columns = ['Index', 'Current', 'Average', 'Min', 'Max', 'Volatility']
+    summary.columns = ['Index', 'Current', 'Average', 'Median', 'Min', 'Max', 'Volatility']
     summary['% vs Avg'] = ((summary['Current'] - summary['Average']) / summary['Average']) * 100
 
     def get_status(row):
@@ -199,7 +199,7 @@ def main():
     display_summary = summary.set_index('Index')
     st.dataframe(
         display_summary.style.format({
-            'Current': '{:.2f}', 'Average': '{:.2f}',
+            'Current': '{:.2f}', 'Average': '{:.2f}', 'Median': '{:.2f}',
             'Min': '{:.2f}', 'Max': '{:.2f}',
             'Volatility': '{:.2f}', '% vs Avg': '{:+.2f}%'
         }).map(highlight_status, subset=['Status']
