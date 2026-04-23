@@ -344,7 +344,7 @@ def load_valuation_data():
 
 def show_valuation_dashboard():
     st.title("📊 NSE Valuation Dashboard: P/E & P/B")
-    st.markdown("Comparative analysis of **Nifty 50, Midcap 150, Smallcap 250, and Total Market**.")
+    st.markdown("Comparative analysis of **Nifty 50, Midcap 150, Smallcap 250 & Total Market**.")
     
     df = load_valuation_data()
     
