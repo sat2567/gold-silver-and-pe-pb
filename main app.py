@@ -10,6 +10,7 @@ import requests
 import io
 import datetime
 import os
+import glob
 import random
 from bs4 import BeautifulSoup
 
@@ -26,7 +27,6 @@ st.set_page_config(
 
 def get_gold_tax_multiplier(date):
     """Returns (1 + Tax Rate) for 'Landed Cost' calculation."""
-    # Ensure input is a valid Timestamp
     dt = pd.Timestamp(date)
     
     if dt < pd.Timestamp("2012-01-17"): return 1.02
@@ -39,9 +39,7 @@ def get_gold_tax_multiplier(date):
     else: return 1.09
 
 def clean_outliers(df, col_name, threshold=0.10):
-    # 1. Remove Zeros
     df = df[df[col_name] > 10].copy()
-    # 2. Remove Massive Spikes (Glitches > 10%)
     daily_ret = df[col_name].pct_change()
     mask = daily_ret.abs().fillna(0) < threshold
     return df[mask]
@@ -49,12 +47,8 @@ def clean_outliers(df, col_name, threshold=0.10):
 @st.cache_data
 def fetch_metals_data():
     tickers = ['GOLDBEES.NS', 'SI=F', 'INR=X']
-    
-    # 1. Download Data safely
-    # Auto_adjust=False ensures we get 'Close' explicitly
     data = yf.download(tickers, period="20y", interval="1d", auto_adjust=False)
     
-    # 2. Handle MultiIndex Columns (Fix for yfinance v0.2+)
     if isinstance(data.columns, pd.MultiIndex):
         try:
             data = data['Close']
@@ -64,13 +58,11 @@ def fetch_metals_data():
             else:
                  data = data.droplevel(0, axis=1)
 
-    # 3. Fill missing values
     data.ffill(inplace=True)
     data.dropna(inplace=True)
     
     df = pd.DataFrame(index=data.index)
     
-    # 4. Extract Gold Data (Cleaned)
     if 'GOLDBEES.NS' in data.columns:
         df['Gold (India)'] = data['GOLDBEES.NS']
     else:
@@ -79,18 +71,15 @@ def fetch_metals_data():
 
     df = clean_outliers(df, 'Gold (India)', threshold=0.10)
     
-    # 5. Calculate Synthetic Silver Price
     common_index = df.index
     
     try:
         si_price = data.loc[common_index, 'SI=F']
         inr_price = data.loc[common_index, 'INR=X']
         
-        # FIX: Generate Tax Multiplier as a simple list of floats
         tax_values = [get_gold_tax_multiplier(d) for d in common_index]
         tax_series = pd.Series(tax_values, index=common_index)
         
-        # Perform Calculation (Force float types)
         df['Silver (India)'] = (
             si_price.astype(float) * inr_price.astype(float) * 32.15 * tax_series.astype(float)
         )
@@ -103,7 +92,6 @@ def fetch_metals_data():
 
 def calculate_rolling_metrics(df):
     metrics = df.copy()
-    # 1-Year Rolling Return (Window = 252 trading days)
     if 'Gold (India)' in metrics.columns:
         metrics['Gold_1Y'] = metrics['Gold (India)'].pct_change(periods=252) * 100
         metrics['Gold_3Y_CAGR'] = ((metrics['Gold (India)'] / metrics['Gold (India)'].shift(756))**(1/3) - 1) * 100
@@ -223,39 +211,136 @@ def show_metals_dashboard():
                 st.pyplot(fig_s)
 
 # ==========================================
-#  MODULE 2: NSE VALUATION
+#  MODULE 2: NSE VALUATION (Auto-discover & merge all CSVs)
 # ==========================================
+
+def discover_csv_files(search_dirs=None):
+    """
+    Auto-discover all Nifty valuation CSV files from multiple directories.
+    Matches any file with 'Historical_PE_PB_DIV_Data' in its name.
+    """
+    if search_dirs is None:
+        search_dirs = ["."]
+    
+    found_files = []
+    for directory in search_dirs:
+        pattern = os.path.join(directory, "*Historical_PE_PB_DIV_Data*.csv")
+        found_files.extend(glob.glob(pattern))
+    
+    # Also try NIFTY* pattern for older naming conventions
+    for directory in search_dirs:
+        pattern = os.path.join(directory, "NIFTY*_PE_PB_DIV*.csv")
+        found_files.extend(glob.glob(pattern))
+    
+    found_files = list(set(found_files))
+    return sorted(found_files)
+
+
+def parse_single_csv(filepath):
+    """
+    Parse a single Nifty valuation CSV file, handling both old and new naming/formats.
+    Returns a cleaned DataFrame with columns: [Date, Index Name, P/E, P/B, Div Yield %]
+    """
+    try:
+        df = pd.read_csv(filepath)
+        # Clean column names (remove quotes and extra whitespace)
+        df.columns = df.columns.str.strip().str.replace('"', '')
+        
+        # Ensure required columns exist
+        required_cols = {'P/E', 'P/B'}
+        if not required_cols.issubset(set(df.columns)):
+            return pd.DataFrame()
+        
+        # Standardize the index name column
+        if 'IndexName' in df.columns:
+            df['Index Name'] = df['IndexName'].str.strip().str.replace('"', '')
+            df.drop(columns=['IndexName'], inplace=True, errors='ignore')
+        elif 'Index Name' in df.columns:
+            df['Index Name'] = df['Index Name'].str.strip().str.replace('"', '')
+        else:
+            # Infer from filename: "NIFTY_50_Historical..." -> "NIFTY 50"
+            basename = os.path.basename(filepath)
+            name_part = basename.split("_Historical")[0] if "_Historical" in basename else basename.split(".")[0]
+            df['Index Name'] = name_part.replace("_", " ")
+        
+        # Parse dates (handle multiple formats like "22 Apr 2026" or "01-01-2025")
+        if 'Date' in df.columns:
+            df['Date'] = df['Date'].astype(str).str.strip().str.replace('"', '')
+            df['Date'] = pd.to_datetime(df['Date'], format='mixed', dayfirst=True)
+        else:
+            return pd.DataFrame()
+        
+        # Clean numeric columns (remove quotes, convert)
+        for col in ['P/E', 'P/B', 'Div Yield %']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.strip().str.replace('"', ''), 
+                    errors='coerce'
+                )
+        
+        if 'Div Yield %' not in df.columns:
+            df['Div Yield %'] = np.nan
+        
+        return df[['Date', 'Index Name', 'P/E', 'P/B', 'Div Yield %']].dropna(subset=['Date', 'P/E', 'P/B'])
+    
+    except Exception as e:
+        return pd.DataFrame()
+
 
 @st.cache_data
 def load_valuation_data():
-    files = {
-        "Nifty 50 (2025)": "NIFTY 50_Historical_PE_PB_DIV_Data_01012025to01012026.csv",
-        "Nifty Midcap 150 (2025)": "NIFTY MIDCAP 150_Historical_PE_PB_DIV_Data_01012025to01012026.csv",
-        "Nifty Smallcap 250 (2025)": "NIFTY SMALLCAP 250_Historical_PE_PB_DIV_Data_01012025to01012026.csv",
-        "Nifty Total Market (2025)": "NIFTY TOTAL MARKET_Historical_PE_PB_DIV_Data_01012025to01012026.csv",
-        "Nifty 50 (2024)": "NIFTY 50_Historical_PE_PB_DIV_Data_01012024to31122024.csv",
-        "Nifty Midcap 150 (2024)": "NIFTY MIDCAP 150_Historical_PE_PB_DIV_Data_01012024to31122024.csv",
-        "Nifty Smallcap 250 (2024)": "NIFTY SMALLCAP 250_Historical_PE_PB_DIV_Data_01012024to31122024.csv",
-        "Nifty Total Market (2024)": "NIFTY TOTAL MARKET_Historical_PE_PB_DIV_Data_01012024to31122024.csv"
-    }
+    """
+    Loads ALL available Nifty valuation CSVs, merges them,
+    deduplicates by (Index Name, Date), and returns a single sorted DataFrame.
     
-    combined_df = pd.DataFrame()
-    for label, filename in files.items():
-        try:
-            df = pd.read_csv(filename)
-            df.columns = df.columns.str.strip().str.replace('"', '')
-            if 'P/B' not in df.columns: continue
-            if 'Date' in df.columns:
-                df['Date'] = pd.to_datetime(df['Date'])
-                if 'IndexName' in df.columns: df['Index Name'] = df['IndexName']
-                elif 'Index Name' not in df.columns: df['Index Name'] = label
-                combined_df = pd.concat([combined_df, df])
-        except FileNotFoundError:
-            pass # Skip missing files silently
+    When you add new CSV files (e.g. for a newer date range), just drop them
+    in the same folder — the app auto-discovers and merges everything,
+    continuing from the last date already present.
+    """
+    search_dirs = ["."]
+    all_files = discover_csv_files(search_dirs)
     
-    if not combined_df.empty:
-        combined_df.sort_values(by=['Index Name', 'Date'], ascending=[True, True], inplace=True)
+    if not all_files:
+        return pd.DataFrame()
+    
+    # Show which files were discovered in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**📂 Loaded Valuation Files:**")
+    
+    all_dfs = []
+    for f in all_files:
+        df = parse_single_csv(f)
+        if not df.empty:
+            basename = os.path.basename(f)
+            date_min = df['Date'].min().strftime('%d-%b-%Y')
+            date_max = df['Date'].max().strftime('%d-%b-%Y')
+            idx_names = df['Index Name'].unique()
+            st.sidebar.caption(f"✅ `{basename}`  \n{', '.join(idx_names)} — {len(df)} rows  \n{date_min} → {date_max}")
+            all_dfs.append(df)
+        else:
+            st.sidebar.caption(f"⚠️ `{os.path.basename(f)}` — skipped")
+    
+    if not all_dfs:
+        return pd.DataFrame()
+    
+    # Combine all files
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    
+    # Deduplicate: same (Index Name, Date) from multiple files — keep latest
+    combined_df.drop_duplicates(subset=['Index Name', 'Date'], keep='last', inplace=True)
+    
+    # Sort chronologically
+    combined_df.sort_values(by=['Index Name', 'Date'], ascending=[True, True], inplace=True)
+    combined_df.reset_index(drop=True, inplace=True)
+    
+    # Summary
+    indices = combined_df['Index Name'].unique()
+    total_from = combined_df['Date'].min().strftime('%d-%b-%Y')
+    total_to = combined_df['Date'].max().strftime('%d-%b-%Y')
+    st.sidebar.success(f"**Merged:** {len(indices)} indices, {len(combined_df)} total rows  \n**Range:** {total_from} → {total_to}")
+    
     return combined_df
+
 
 def show_valuation_dashboard():
     st.title("📊 NSE Valuation Dashboard: P/E & P/B")
@@ -263,7 +348,12 @@ def show_valuation_dashboard():
     df = load_valuation_data()
     
     if df.empty:
-        st.error("No CSV files found. Please ensure the Nifty CSVs are in the folder.")
+        st.error(
+            "No CSV files found. Place your Nifty valuation CSVs "
+            "(e.g. `NIFTY_50_Historical_PE_PB_DIV_Data_*.csv`) in the same folder as this app.\n\n"
+            "The app auto-discovers all matching files, merges them, and deduplicates by date — "
+            "so you can keep adding new date-range files without removing the old ones."
+        )
         return
 
     # Configuration
@@ -285,6 +375,9 @@ def show_valuation_dashboard():
         avg_val = subset[selected_col].mean()
         diff_pct = ((current_val - avg_val) / avg_val) * 100
         
+        latest_date = subset['Date'].max().strftime('%d-%b-%Y')
+        earliest_date = subset['Date'].min().strftime('%d-%b-%Y')
+        
         if selected_col == "Div Yield %":
             if diff_pct > 5: status = "Undervalued (High Yield) 🟢"
             elif diff_pct < -5: status = "Overvalued (Low Yield) 🔴"
@@ -299,7 +392,9 @@ def show_valuation_dashboard():
             "Current": current_val,
             "Historical Average": avg_val,
             "Diff (%)": diff_pct,
-            "Valuation Status": status
+            "Valuation Status": status,
+            "Data Range": f"{earliest_date} → {latest_date}",
+            "Data Points": len(subset),
         })
         
     summary_df = pd.DataFrame(summary_data).set_index("Index Name")
@@ -357,7 +452,6 @@ def show_valuation_dashboard():
 #  MODULE 3: DEEP SILVER ANALYTICS (INVENTORY TRENDS)
 # ==========================================
 
-# Headers for scraping
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
@@ -365,17 +459,13 @@ HEADERS = {
 HISTORY_FILE = "silver_inventory_history.csv"
 
 def get_comex_inventory():
-    """Extracts Daily Silver Inventory from CME Group (COMEX)."""
     url = "https://www.cmegroup.com/delivery_reports/Silver_stocks.xls"
     try:
         response = requests.get(url, headers=HEADERS)
         response.raise_for_status()
         df = pd.read_excel(io.BytesIO(response.content))
-        
-        # Heuristic search for totals
         total_registered = df[df.apply(lambda row: row.astype(str).str.contains('TOTAL REGISTERED').any(), axis=1)].iloc[0, -1]
         total_eligible = df[df.apply(lambda row: row.astype(str).str.contains('TOTAL ELIGIBLE').any(), axis=1)].iloc[0, -1]
-        
         return {
             "Date": datetime.date.today(),
             "Source": "COMEX (NY)",
@@ -384,8 +474,7 @@ def get_comex_inventory():
             "Eligible (oz)": float(total_eligible),
             "Total (oz)": float(total_registered) + float(total_eligible)
         }
-    except Exception as e:
-        # Fallback for demo purposes if parsing changes/fails
+    except Exception:
         return {
             "Date": datetime.date.today(),
             "Source": "COMEX (NY)",
@@ -396,15 +485,12 @@ def get_comex_inventory():
         }
 
 def get_slv_holdings():
-    """Extracts SLV ETF holdings."""
-    # Fallback/Demo URL for iShares
     url = "https://www.ishares.com/us/products/239855/ishares-silver-trust-fund/1467271812596.ajax?fileType=csv&fileName=SLV_holdings&dataType=fund"
     try:
         df = pd.read_csv(url, skiprows=9)
         silver_row = df[df['Name'] == 'SILVER'].iloc[0]
         weight_col = [c for c in df.columns if 'Weight' in c][0]
         tonnes = float(str(silver_row[weight_col]).replace(',', ''))
-        
         return {
             "Date": datetime.date.today(),
             "Source": "SLV ETF (London)",
@@ -460,10 +546,8 @@ def save_to_history(new_df):
     if os.path.exists(HISTORY_FILE):
         history_df = pd.read_csv(HISTORY_FILE)
         history_df['Date'] = pd.to_datetime(history_df['Date'])
-        
         today = pd.Timestamp(datetime.date.today())
         history_df = history_df[history_df['Date'] != today]
-        
         updated_df = pd.concat([history_df, new_df], ignore_index=True)
     else:
         updated_df = new_df
@@ -473,7 +557,6 @@ def save_to_history(new_df):
     return updated_df
 
 def generate_demo_history():
-    """Generates 180 days of realistic dummy data for trend visualization."""
     dates = pd.date_range(end=datetime.date.today(), periods=180)
     data = []
     
