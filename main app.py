@@ -154,9 +154,62 @@ table.insert(0, "Month", table.index.strftime("%b"))
 table.insert(0, "Year", table.index.year)
 table = table.reset_index(drop=True)
 
-# ONE TAB — the month-wise valuation table
-tab, = st.tabs([f"📅 Month-wise {metric_choice} Table"])
+# --- CURRENT-LEVEL SNAPSHOT: average / median + where current sits ---------
+# Computed on the full DAILY history (Jan 2024 -> latest) for the selected
+# metric. "Percentile" = share of historical days at or below the current
+# value, i.e. how stretched today's reading is within its own range.
+snap_rows = []
+for idx in INDEX_ORDER:
+    s = df.loc[df["Index Name"] == idx, selected_col].dropna()
+    if s.empty:
+        continue
+    cur = s.iloc[-1]            # df is date-sorted within index, so this is latest
+    avg = s.mean()
+    med = s.median()
+    pct = (s <= cur).mean() * 100
+    zone = "Cheap 🟢" if pct < 25 else ("Expensive 🔴" if pct > 75 else "Fair 🟡")
+    snap_rows.append(
+        {
+            "Index": idx,
+            "Current": cur,
+            "Average": avg,
+            "Median": med,
+            "% vs Avg": (cur / avg - 1) * 100,
+            "% vs Median": (cur / med - 1) * 100,
+            "Percentile": pct,
+            "Min": s.min(),
+            "Max": s.max(),
+            "Level": zone,
+        }
+    )
+snapshot = pd.DataFrame(snap_rows)
+
+# ONE TAB — snapshot on top, month-wise table below
+tab, = st.tabs([f"📅 {metric_choice} — Levels & Month-wise Table"])
 with tab:
+    st.subheader(f"📌 Current {metric_choice}: Average, Median & Level")
+    st.caption(
+        f"Full-history basis ({df['Date'].min().strftime('%b %Y')} → "
+        f"{df['Date'].max().strftime('%b %Y')}). Percentile = how high today's "
+        "reading sits within its own range (higher = richer for P/E & P/B)."
+    )
+    snap_styled = (
+        snapshot.style
+        .format(
+            {
+                "Current": "{:.2f}", "Average": "{:.2f}", "Median": "{:.2f}",
+                "% vs Avg": "{:+.1f}%", "% vs Median": "{:+.1f}%",
+                "Percentile": "{:.0f}%", "Min": "{:.2f}", "Max": "{:.2f}",
+            }
+        )
+        .background_gradient(subset=["Percentile"], cmap="RdYlGn_r", vmin=0, vmax=100)
+        .background_gradient(subset=["% vs Avg", "% vs Median"], cmap="RdYlGn_r")
+    )
+    st.dataframe(snap_styled, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    st.subheader(f"📅 Month-wise {metric_choice}")
     basis = "month-end" if agg_choice.startswith("Month-end") else "monthly-average"
     st.caption(
         f"Each row is one calendar month ({basis} {metric_choice}). "
