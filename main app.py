@@ -178,14 +178,9 @@ def build_snapshot(monthly: pd.DataFrame, order, selected_col: str) -> pd.DataFr
         rows.append(
             {
                 "Index": idx,
-                "From": sub["Period"].iloc[0].strftime("%b %Y"),  # first month used
-                "Months": int(len(sub)),                          # # monthly obs -> uneven coverage
                 "Current": cur,
                 "Average": avg,
                 "Median": med,
-                "Min": s.min(),                                   # month-level outlier check
-                "Max": s.max(),
-                "% vs Avg": (cur / avg - 1) * 100,
                 "% vs Median": (cur / med - 1) * 100,
             }
         )
@@ -219,22 +214,18 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
     # --- snapshot (computed on the monthly series) ---
     st.subheader(f"Current {metric_choice}: Average & Median")
     st.caption(
-        f"Computed on the {basis} MONTHLY series (one point per month), per index over "
-        f"its own months within {dfg['Date'].min().strftime('%b %Y')} -> "
-        f"{dfg['Date'].max().strftime('%b %Y')}. Current = latest month's value (= top row "
-        "below). 'From'/'Months' show start + count per index; Min/Max flag month-level "
-        "outliers. '% vs' = premium (+) / discount (-) vs own avg / median."
+        f"Computed on the {basis} MONTHLY series, per index over its own months within "
+        f"{dfg['Date'].min().strftime('%b %Y')} -> {dfg['Date'].max().strftime('%b %Y')}. "
+        "Current = latest month's value. '% vs Median' = premium (+) / discount (-) vs own median."
     )
     snapshot = build_snapshot(monthly, order, selected_col)
     st.dataframe(
         snapshot.style.format(
             {
-                "Months": "{:d}",
                 "Current": "{:.2f}", "Average": "{:.2f}", "Median": "{:.2f}",
-                "Min": "{:.2f}", "Max": "{:.2f}",
-                "% vs Avg": "{:+.1f}%", "% vs Median": "{:+.1f}%",
+                "% vs Median": "{:+.1f}%",
             }
-        ).background_gradient(subset=["% vs Avg", "% vs Median"], cmap="RdYlGn_r"),
+        ).background_gradient(subset=["% vs Median"], cmap="RdYlGn_r"),
         use_container_width=True, hide_index=True,
     )
 
