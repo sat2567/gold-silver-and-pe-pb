@@ -206,7 +206,6 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
 
     order = [c for c in order if c in set(dfg["Index Name"].unique())]
     month_end = agg_choice.startswith("Month-end")
-    basis = "month-end" if month_end else "monthly-average"
 
     # Build the monthly series ONCE; snapshot and table both read from it.
     monthly = monthly_long(dfg, selected_col, month_end)
@@ -229,9 +228,6 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
     # --- month-wise table (same monthly series) ---
     st.subheader(f"Month-wise {metric_choice}")
     table = build_month_table(monthly, order, selected_col)
-    st.caption(
-        }."
-    )
     idx_cols = [c for c in order if c in table.columns]
     st.dataframe(
         table.style.format({c: "{:.2f}" for c in idx_cols})
