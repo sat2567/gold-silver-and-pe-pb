@@ -213,11 +213,6 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
 
     # --- snapshot (computed on the monthly series) ---
     st.subheader(f"Current {metric_choice}: Average & Median")
-    st.caption(
-        f"Computed on the {basis} MONTHLY series, per index over its own months within "
-        f"{dfg['Date'].min().strftime('%b %Y')} -> {dfg['Date'].max().strftime('%b %Y')}. "
-        "Current = latest month's value. '% vs Median' = premium (+) / discount (-) vs own median."
-    )
     snapshot = build_snapshot(monthly, order, selected_col)
     st.dataframe(
         snapshot.style.format(
