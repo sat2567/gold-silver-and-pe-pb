@@ -22,16 +22,25 @@ ALLOWED_INDICES = {
 # Fixed left-to-right column order (large -> broad)
 INDEX_ORDER = ["NIFTY 50", "NIFTY MIDCAP 150", "NIFTY SMALLCAP 250", "NIFTY TOTAL MARKET"]
 
+# Two readings for the same (index, date) are treated as a real "conflict"
+# only if they differ by more than this. Below it, it's just rounding noise.
+CONFLICT_TOL = 0.01
+
 
 # ==========================================================================
 #  DATA LOADING
-#  Auto-discovers every PE/PB/DIV CSV in the folder and MERGES them by
-#  deduplicating on (Index Name, Date) keeping the LAST occurrence. This
-#  absorbs every overlap in your folder automatically:
-#    - 01012025to01012026  vs  01052025to23042026  vs  01012026to02072026
-#    - "... - Copy" duplicate files
-#  Overlapping ("common") dates collapse to one row; only the further dates
-#  from each additional file actually extend the history.
+#  Auto-discovers every PE/PB/DIV CSV in the folder and MERGES them.
+#
+#  OVERLAP HANDLING (the important bit for the new rolling-1yr files):
+#  The new *_17092025to04092026.csv files overlap the tail of your older
+#  files on ~a year of dates. Where two files carry the SAME (index, date):
+#    - identical value  -> collapses to one row (just extends history)
+#    - DIFFERENT value  -> the row from the file whose own coverage ends
+#                          LATEST wins (i.e. the newer export's restated
+#                          number), deterministically. The old code kept
+#                          whichever FILENAME sorted last alphabetically,
+#                          which could silently retain stale numbers.
+#  Every shared date and every genuine conflict is reported in the sidebar.
 # ==========================================================================
 @st.cache_data
 def parse_single_csv(filepath: str) -> pd.DataFrame:
@@ -70,42 +79,87 @@ def parse_single_csv(filepath: str) -> pd.DataFrame:
     if "Div Yield %" not in df.columns:
         df["Div Yield %"] = np.nan
 
-    return df[["Date", "Index Name", "P/E", "P/B", "Div Yield %"]].dropna(
+    df["__src"] = os.path.basename(filepath)  # provenance for overlap resolution
+    return df[["Date", "Index Name", "P/E", "P/B", "Div Yield %", "__src"]].dropna(
         subset=["Date", "P/E", "P/B"]
     )
 
 
 @st.cache_data
-def load_and_merge_data() -> pd.DataFrame:
+def load_and_merge_data():
+    """Returns (combined_df, overlap_report_dict)."""
     patterns = ["*Historical_PE_PB_DIV_Data*.csv", "NIFTY*_PE_PB_DIV*.csv"]
     files = sorted(set(sum((glob.glob(p) for p in patterns), [])))
     if not files:
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
-    st.sidebar.markdown("**📂 Files merged**")
+    file_captions = []
     frames = []
     for f in files:
         part = parse_single_csv(f)
         if part.empty:
-            st.sidebar.caption(f"⚠️ {os.path.basename(f)} — skipped")
+            file_captions.append(f"⚠️ {os.path.basename(f)} — skipped")
             continue
         rng = f"{part['Date'].min().date()} → {part['Date'].max().date()}"
-        st.sidebar.caption(f"✅ {os.path.basename(f)}  ({len(part)}r, {rng})")
+        file_captions.append(f"✅ {os.path.basename(f)}  ({len(part)}r, {rng})")
+        # Recency key = the latest date THIS file covers. Newer export -> larger key.
+        part["__rank"] = part["Date"].max()
         frames.append(part)
 
     if not frames:
-        return pd.DataFrame()
+        return pd.DataFrame(), {"captions": file_captions}
 
     combined = pd.concat(frames, ignore_index=True)
-    combined.sort_values(by=["Index Name", "Date"], ascending=[True, True], inplace=True)
-    combined.drop_duplicates(subset=["Index Name", "Date"], keep="last", inplace=True)
     combined = combined[combined["Index Name"].isin(ALLOWED_INDICES)]
+
+    # ---- OVERLAP / CONFLICT DIAGNOSTICS (before dedup) --------------------
+    grp = combined.groupby(["Index Name", "Date"])
+    src_counts = grp["__src"].nunique()
+    shared_keys = src_counts[src_counts > 1]              # dates present in >1 file
+    pe_spread = grp["P/E"].agg(lambda s: s.max() - s.min())
+    pb_spread = grp["P/B"].agg(lambda s: s.max() - s.min())
+    conflict_mask = (
+        src_counts.gt(1)
+        & ((pe_spread > CONFLICT_TOL) | (pb_spread > CONFLICT_TOL))
+    )
+    conflicts = (
+        pd.DataFrame(
+            {
+                "Index Name": [k[0] for k in conflict_mask[conflict_mask].index],
+                "Date": [k[1] for k in conflict_mask[conflict_mask].index],
+                "ΔP/E": pe_spread[conflict_mask].values,
+                "ΔP/B": pb_spread[conflict_mask].values,
+            }
+        )
+        .sort_values("ΔP/E", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    report = {
+        "captions": file_captions,
+        "shared_dates": int(len(shared_keys)),
+        "conflicts": conflicts,
+    }
+
+    # ---- DETERMINISTIC DEDUP: newest file wins ---------------------------
+    # Stable sort so equal __rank keeps concat order; keep="last" then takes
+    # the row from the file with the latest coverage.
+    combined.sort_values(
+        by=["Index Name", "Date", "__rank"], kind="mergesort", inplace=True
+    )
+    combined.drop_duplicates(subset=["Index Name", "Date"], keep="last", inplace=True)
+    combined.drop(columns=["__rank", "__src"], inplace=True)
     combined.reset_index(drop=True, inplace=True)
-    return combined
+    return combined, report
 
 
 # --------------------------------------------------------------------------
-df = load_and_merge_data()
+df, report = load_and_merge_data()
+
+# --- SIDEBAR: files + overlap diagnostics ---------------------------------
+st.sidebar.markdown("**📂 Files merged**")
+for cap in report.get("captions", []):
+    st.sidebar.caption(cap)
 
 if df.empty:
     st.warning(
@@ -118,6 +172,23 @@ st.sidebar.markdown(
     f"**Coverage:** {df['Date'].min().date()} → {df['Date'].max().date()}  "
     f"({df['Index Name'].nunique()} indices)"
 )
+
+# Overlap panel — how the new rolling-1yr files collided with the older ones.
+st.sidebar.markdown("**🔁 Overlap**")
+n_shared = report.get("shared_dates", 0)
+conflicts = report.get("conflicts", pd.DataFrame())
+st.sidebar.caption(f"Shared (index, date) pairs across files: **{n_shared}**")
+if conflicts is not None and not conflicts.empty:
+    st.sidebar.caption(
+        f"⚠️ **{len(conflicts)}** had differing values — newest file kept. Top:"
+    )
+    st.sidebar.dataframe(
+        conflicts.assign(Date=lambda x: x["Date"].dt.date).head(10),
+        use_container_width=True,
+        hide_index=True,
+    )
+else:
+    st.sidebar.caption("✅ All overlapping dates agreed (clean merge).")
 
 # --- CONFIG ---
 st.sidebar.header("⚙️ Configuration")
@@ -155,9 +226,9 @@ table.insert(0, "Year", table.index.year)
 table = table.reset_index(drop=True)
 
 # --- CURRENT-LEVEL SNAPSHOT: average / median + premium/discount -----------
-# Computed on the full DAILY history (Jan 2024 -> latest) for the selected
-# metric. "% vs Avg" / "% vs Median" show where the current reading sits
-# relative to its own history (positive = richer than usual).
+# Computed on the full DAILY history for the selected metric. "% vs Avg" /
+# "% vs Median" show where the current reading sits relative to its own
+# history (positive = richer than usual).
 snap_rows = []
 for idx in INDEX_ORDER:
     s = df.loc[df["Index Name"] == idx, selected_col].dropna()
