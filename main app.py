@@ -230,9 +230,7 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
     st.subheader(f"Month-wise {metric_choice}")
     table = build_month_table(monthly, order, selected_col)
     st.caption(
-        f"Each row is one calendar month ({basis} {metric_choice}). Newest first. "
-        f"{len(table)} months, {dfg['Date'].min().strftime('%b %Y')} -> "
-        f"{dfg['Date'].max().strftime('%b %Y')}."
+        }."
     )
     idx_cols = [c for c in order if c in table.columns]
     st.dataframe(
