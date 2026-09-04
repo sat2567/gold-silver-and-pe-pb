@@ -148,23 +148,42 @@ def load_and_merge_data():
 # ==========================================================================
 #  ONE SHARED RENDERER - snapshot + month-wise table for any index group.
 # ==========================================================================
-def build_snapshot(dfg: pd.DataFrame, order, selected_col: str) -> pd.DataFrame:
+def monthly_long(dfg: pd.DataFrame, selected_col: str, month_end: bool) -> pd.DataFrame:
+    """Collapse daily -> ONE value per (month, index): month-end last value, or
+    monthly mean. Both the snapshot and the month-wise table are built from this,
+    so their numbers are identical and neither is exposed to daily-tick outliers."""
+    d = dfg.copy()
+    d["Period"] = d["Date"].dt.to_period("M")
+    if month_end:
+        m = (
+            d.sort_values("Date")
+            .groupby(["Period", "Index Name"])[selected_col].last().reset_index()
+        )
+    else:
+        m = d.groupby(["Period", "Index Name"])[selected_col].mean().reset_index()
+    return m
+
+
+def build_snapshot(monthly: pd.DataFrame, order, selected_col: str) -> pd.DataFrame:
+    """Average / Median / Min / Max computed on the MONTHLY series (one point per
+    month), NOT on daily ticks. Current = latest month's value (= top row of table)."""
     rows = []
     for idx in order:
-        sub = dfg.loc[dfg["Index Name"] == idx].sort_values("Date")
-        s = sub[selected_col].dropna()
-        if s.empty:
+        sub = monthly.loc[monthly["Index Name"] == idx].sort_values("Period")
+        sub = sub[sub[selected_col].notna()]
+        if sub.empty:
             continue
+        s = sub[selected_col]
         cur, avg, med = s.iloc[-1], s.mean(), s.median()
         rows.append(
             {
                 "Index": idx,
-                "From": sub.loc[s.index, "Date"].min().date(),  # actual per-index start used
-                "N": int(s.shape[0]),                           # obs count -> exposes uneven coverage
+                "From": sub["Period"].iloc[0].strftime("%b %Y"),  # first month used
+                "Months": int(len(sub)),                          # # monthly obs -> uneven coverage
                 "Current": cur,
                 "Average": avg,
                 "Median": med,
-                "Min": s.min(),                                 # outlier check
+                "Min": s.min(),                                   # month-level outlier check
                 "Max": s.max(),
                 "% vs Avg": (cur / avg - 1) * 100,
                 "% vs Median": (cur / med - 1) * 100,
@@ -173,16 +192,7 @@ def build_snapshot(dfg: pd.DataFrame, order, selected_col: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_month_table(dfg: pd.DataFrame, order, selected_col: str, month_end: bool) -> pd.DataFrame:
-    d = dfg.copy()
-    d["Period"] = d["Date"].dt.to_period("M")
-    if month_end:
-        monthly = (
-            d.sort_values("Date").groupby(["Period", "Index Name"])[selected_col].last().reset_index()
-        )
-    else:
-        monthly = d.groupby(["Period", "Index Name"])[selected_col].mean().reset_index()
-
+def build_month_table(monthly: pd.DataFrame, order, selected_col: str) -> pd.DataFrame:
     pivot = monthly.pivot(index="Period", columns="Index Name", values=selected_col)
     pivot = pivot.reindex(columns=[c for c in order if c in pivot.columns])
     pivot = pivot.sort_index(ascending=False)  # newest month on top
@@ -201,19 +211,27 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
 
     order = [c for c in order if c in set(dfg["Index Name"].unique())]
     month_end = agg_choice.startswith("Month-end")
+    basis = "month-end" if month_end else "monthly-average"
 
-    # --- snapshot ---
+    # Build the monthly series ONCE; snapshot and table both read from it.
+    monthly = monthly_long(dfg, selected_col, month_end)
+
+    # --- snapshot (computed on the monthly series) ---
     st.subheader(f"Current {metric_choice}: Average & Median")
     st.caption(
-        f"Full-history basis ({dfg['Date'].min().strftime('%b %Y')} -> "
-        f"{dfg['Date'].max().strftime('%b %Y')}). Current = latest daily value; "
-        "'% vs' shows premium (+) or discount (-) to its own average / median."
+        f"Computed on the {basis} MONTHLY series (one point per month), per index over "
+        f"its own months within {dfg['Date'].min().strftime('%b %Y')} -> "
+        f"{dfg['Date'].max().strftime('%b %Y')}. Current = latest month's value (= top row "
+        "below). 'From'/'Months' show start + count per index; Min/Max flag month-level "
+        "outliers. '% vs' = premium (+) / discount (-) vs own avg / median."
     )
-    snapshot = build_snapshot(dfg, order, selected_col)
+    snapshot = build_snapshot(monthly, order, selected_col)
     st.dataframe(
         snapshot.style.format(
             {
+                "Months": "{:d}",
                 "Current": "{:.2f}", "Average": "{:.2f}", "Median": "{:.2f}",
+                "Min": "{:.2f}", "Max": "{:.2f}",
                 "% vs Avg": "{:+.1f}%", "% vs Median": "{:+.1f}%",
             }
         ).background_gradient(subset=["% vs Avg", "% vs Median"], cmap="RdYlGn_r"),
@@ -222,10 +240,9 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
 
     st.divider()
 
-    # --- month-wise table ---
+    # --- month-wise table (same monthly series) ---
     st.subheader(f"Month-wise {metric_choice}")
-    basis = "month-end" if month_end else "monthly-average"
-    table = build_month_table(dfg, order, selected_col, month_end)
+    table = build_month_table(monthly, order, selected_col)
     st.caption(
         f"Each row is one calendar month ({basis} {metric_choice}). Newest first. "
         f"{len(table)} months, {dfg['Date'].min().strftime('%b %Y')} -> "
