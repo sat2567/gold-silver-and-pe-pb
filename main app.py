@@ -17,6 +17,10 @@ st.markdown(
 BROAD_ORDER = ["NIFTY 50", "NIFTY MIDCAP 150", "NIFTY SMALLCAP 250", "NIFTY TOTAL MARKET"]
 BROAD_INDICES = set(BROAD_ORDER)
 
+# Broad-market analysis starts here (snapshot avg/median AND month-wise table).
+# Rows before this date are dropped for the broad tab only; sectors are unaffected.
+BROAD_START = pd.Timestamp("2024-03-01")
+
 # Stray valuation files we never want to show (e.g. a duplicate SMALLCAP 100 export).
 IGNORE_INDICES = {"NIFTY SMALLCAP 100"}
 
@@ -255,6 +259,7 @@ if df.empty:
 
 # Partition into broad vs sector.
 df_broad = df[df["Index Name"].isin(BROAD_INDICES)].copy()
+df_broad = df_broad[df_broad["Date"] >= BROAD_START]  # floor broad tab at Mar 2024
 df_sector = df[~df["Index Name"].isin(BROAD_INDICES)].copy()
 SECTOR_ORDER = sorted(df_sector["Index Name"].unique())
 
