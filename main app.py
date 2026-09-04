@@ -151,16 +151,21 @@ def load_and_merge_data():
 def build_snapshot(dfg: pd.DataFrame, order, selected_col: str) -> pd.DataFrame:
     rows = []
     for idx in order:
-        s = dfg.loc[dfg["Index Name"] == idx].sort_values("Date")[selected_col].dropna()
+        sub = dfg.loc[dfg["Index Name"] == idx].sort_values("Date")
+        s = sub[selected_col].dropna()
         if s.empty:
             continue
         cur, avg, med = s.iloc[-1], s.mean(), s.median()
         rows.append(
             {
                 "Index": idx,
+                "From": sub.loc[s.index, "Date"].min().date(),  # actual per-index start used
+                "N": int(s.shape[0]),                           # obs count -> exposes uneven coverage
                 "Current": cur,
                 "Average": avg,
                 "Median": med,
+                "Min": s.min(),                                 # outlier check
+                "Max": s.max(),
                 "% vs Avg": (cur / avg - 1) * 100,
                 "% vs Median": (cur / med - 1) * 100,
             }
