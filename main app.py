@@ -31,7 +31,11 @@ CONFLICT_TOL = 0.01
 # Look for CSVs next to this script, so the app works no matter which directory
 # streamlit was launched from. The CWD is also scanned, as a fallback.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-FILE_PATTERNS = ["*Historical_PE_PB_DIV_Data*.csv", "NIFTY*_PE_PB_DIV*.csv"]
+FILE_PATTERNS = [
+    "*PE_PB_DIV*.csv",                  # widest: any PE/PB/DIV export, any prefix
+    "*Historical_PE_PB_DIV_Data*.csv",
+    "NIFTY*_PE_PB_DIV*.csv",
+]
 
 
 # ==========================================================================
@@ -53,15 +57,26 @@ FILE_PATTERNS = ["*Historical_PE_PB_DIV_Data*.csv", "NIFTY*_PE_PB_DIV*.csv"]
 #  the old merge for the whole session and the new month would not appear.
 # ==========================================================================
 def discover_files() -> list:
+    """EVERY .csv in the data folders is a candidate. Discovery is by CONTENT,
+    not filename: parse_single_csv keeps a file only if it has Date + P/E + P/B,
+    so a differently-named download ("NIFTY_IT_sept(1).csv") still loads, while
+    a PR/OHLC price file is still rejected. Filename patterns are kept only to
+    sort the likely valuation files first in the sidebar listing."""
     dirs = [SCRIPT_DIR]
     cwd = os.path.abspath(os.getcwd())
     if cwd != SCRIPT_DIR:
         dirs.append(cwd)
-    found = set()
+    every = set()
     for d in dirs:
-        for pat in FILE_PATTERNS:
-            found.update(glob.glob(os.path.join(d, pat)))
-    return sorted(found)
+        every.update(glob.glob(os.path.join(d, "*.csv")))
+
+    def _likely(path: str) -> int:
+        base = os.path.basename(path)
+        return 0 if any(
+            glob.fnmatch.fnmatch(base, pat) for pat in FILE_PATTERNS
+        ) else 1
+
+    return sorted(every, key=lambda f: (_likely(f), os.path.basename(f)))
 
 
 def file_signature(files: list) -> tuple:
@@ -135,11 +150,16 @@ def load_and_merge_data(_sig: tuple):
         return pd.DataFrame(), {}
 
     file_captions = []
+    skipped = []
     frames = []
     for f in files:
         part = parse_single_csv(f, _sig)
         if part.empty:
-            file_captions.append(f"WARN {os.path.basename(f)} - skipped")
+            file_captions.append(
+                f"SKIPPED {os.path.basename(f)} - no P/E+P/B+Date columns, "
+                "or no parseable rows"
+            )
+            skipped.append(os.path.basename(f))
             continue
         rng = f"{part['Date'].min().date()} -> {part['Date'].max().date()}"
         file_captions.append(f"OK {os.path.basename(f)}  ({len(part)}r, {rng})")
@@ -147,7 +167,7 @@ def load_and_merge_data(_sig: tuple):
         frames.append(part)
 
     if not frames:
-        return pd.DataFrame(), {"captions": file_captions}
+        return pd.DataFrame(), {"captions": file_captions, "skipped": skipped}
 
     combined = pd.concat(frames, ignore_index=True)
     combined = combined[~combined["Index Name"].isin(IGNORE_INDICES)]
@@ -173,6 +193,7 @@ def load_and_merge_data(_sig: tuple):
 
     report = {
         "captions": file_captions,
+        "skipped": skipped,
         "shared_dates": int((src_counts > 1).sum()),
         "conflicts": conflicts,
     }
@@ -294,32 +315,6 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
         use_container_width=True, hide_index=True,
     )
 
-    # Honest label on the newest month: if it is still being filled in, "Current"
-    # is a part-month reading sitting next to full-month history. Say so.
-    last_period = monthly["Period"].max()
-    tail = monthly[monthly["Period"] == last_period]
-    expected = len(pd.bdate_range(last_period.start_time, last_period.end_time))
-    if int(tail["obs"].max()) < expected - 3:
-        st.caption(
-            f"⚠️ {last_period.strftime('%b %Y')} is partial — "
-            f"{int(tail['obs'].max())} of ~{expected} trading days so far. "
-            "'Current' is a part-month reading."
-        )
-    else:
-        st.caption(
-            f"Latest complete month: **{last_period.strftime('%b %Y')}** "
-            f"({int(tail['obs'].max())} trading days)."
-        )
-
-    # Uneven history depth: a median over 2 months and one over 30 are not
-    # comparable, so say so rather than letting the column imply they are.
-    if not snapshot.empty and snapshot["Months"].nunique() > 1:
-        st.caption(
-            f"'% vs Median' rests on {snapshot['Months'].min()}-{snapshot['Months'].max()} "
-            "months depending on the index - shallow histories are not comparable "
-            "with deep ones. See the 'Months' column."
-        )
-
     # Holes inside an index's own span break Average / Median silently.
     cov = month_coverage(dfg)
     holed = cov[cov["Missing"] > 0]
@@ -352,13 +347,22 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
 
 
 # --------------------------------------------------------------------------
-_sig = file_signature(discover_files())
+_discovered = discover_files()
+_sig = file_signature(_discovered)
 df, report = load_and_merge_data(_sig)
 
 # --- SIDEBAR: files + overlap diagnostics ---------------------------------
-st.sidebar.markdown("**Files merged**")
+st.sidebar.markdown(f"**Files merged** ({len(_discovered)} CSVs scanned)")
 for cap in report.get("captions", []):
     st.sidebar.caption(cap)
+
+if report.get("skipped"):
+    st.sidebar.markdown("**:red[CSVs found but not loaded]**")
+    for n in report["skipped"]:
+        st.sidebar.caption(n)
+    st.sidebar.caption(
+        "These have no Date + P/E + P/B columns (price/PR exports look like this)."
+    )
 
 if df.empty:
     st.warning(
