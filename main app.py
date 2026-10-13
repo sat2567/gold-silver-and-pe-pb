@@ -28,11 +28,17 @@ IGNORE_INDICES = {"NIFTY SMALLCAP 100"}
 # they differ by more than this. Below it, it's just rounding noise.
 CONFLICT_TOL = 0.01
 
+# Look for CSVs next to this script, so the app works no matter which directory
+# streamlit was launched from. The CWD is also scanned, as a fallback.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FILE_PATTERNS = ["*Historical_PE_PB_DIV_Data*.csv", "NIFTY*_PE_PB_DIV*.csv"]
+
 
 # ==========================================================================
 #  DATA LOADING
 #  Auto-discovers every PE/PB/DIV CSV, MERGES them, and partitions into
-#  BROAD vs SECTOR by index name.
+#  BROAD vs SECTOR by index name. Dropping a new export into the folder is
+#  all that is needed to extend history - no code edit, no rename.
 #
 #  OVERLAP HANDLING: where two files carry the SAME (index, date):
 #    - identical value  -> collapses to one row (just extends history)
@@ -40,11 +46,39 @@ CONFLICT_TOL = 0.01
 #                          LATEST wins (the newer export's restated number),
 #                          deterministically. Every shared date and every
 #                          genuine conflict is reported in the sidebar.
-#  (The abutting sector windows ...to01092025 / 02092025to... don't overlap,
-#   so they simply stitch; the older broad-market files may overlap.)
+#
+#  CACHING: both loaders are keyed on a signature of the files on disk
+#  (name + size + mtime). Add or re-download an export and the cache
+#  invalidates by itself - without this, st.cache_data would keep serving
+#  the old merge for the whole session and the new month would not appear.
 # ==========================================================================
-@st.cache_data
-def parse_single_csv(filepath: str) -> pd.DataFrame:
+def discover_files() -> list:
+    dirs = [SCRIPT_DIR]
+    cwd = os.path.abspath(os.getcwd())
+    if cwd != SCRIPT_DIR:
+        dirs.append(cwd)
+    found = set()
+    for d in dirs:
+        for pat in FILE_PATTERNS:
+            found.update(glob.glob(os.path.join(d, pat)))
+    return sorted(found)
+
+
+def file_signature(files: list) -> tuple:
+    """Cheap fingerprint of the data folder; changes whenever a file is added,
+    removed, re-downloaded or edited. Used as the cache key."""
+    sig = []
+    for f in files:
+        try:
+            s = os.stat(f)
+            sig.append((os.path.basename(f), s.st_size, int(s.st_mtime)))
+        except OSError:
+            continue
+    return tuple(sig)
+
+
+@st.cache_data(show_spinner=False)
+def parse_single_csv(filepath: str, _sig: tuple) -> pd.DataFrame:
     try:
         df = pd.read_csv(filepath)
     except Exception:
@@ -64,6 +98,13 @@ def parse_single_csv(filepath: str) -> pd.DataFrame:
         base = os.path.basename(filepath)
         name = base.split("_Historical")[0] if "_Historical" in base else base.split(".")[0]
         df["Index Name"] = name.replace("_", " ").strip()
+
+    # Index names are normalised (collapse double spaces, upper-case) so that
+    # "NIFTY  50" from one export and "Nifty 50" from another merge as one series
+    # instead of silently becoming two columns.
+    df["Index Name"] = (
+        df["Index Name"].str.replace(r"\s+", " ", regex=True).str.strip().str.upper()
+    )
 
     if "Date" not in df.columns:
         return pd.DataFrame()
@@ -86,18 +127,17 @@ def parse_single_csv(filepath: str) -> pd.DataFrame:
     )
 
 
-@st.cache_data
-def load_and_merge_data():
+@st.cache_data(show_spinner=False)
+def load_and_merge_data(_sig: tuple):
     """Returns (combined_df_all_indices, overlap_report_dict)."""
-    patterns = ["*Historical_PE_PB_DIV_Data*.csv", "NIFTY*_PE_PB_DIV*.csv"]
-    files = sorted(set(sum((glob.glob(p) for p in patterns), [])))
+    files = discover_files()
     if not files:
         return pd.DataFrame(), {}
 
     file_captions = []
     frames = []
     for f in files:
-        part = parse_single_csv(f)
+        part = parse_single_csv(f, _sig)
         if part.empty:
             file_captions.append(f"WARN {os.path.basename(f)} - skipped")
             continue
@@ -151,17 +191,18 @@ def load_and_merge_data():
 def monthly_long(dfg: pd.DataFrame, selected_col: str, month_end: bool) -> pd.DataFrame:
     """Collapse daily -> ONE value per (month, index): month-end last value, or
     monthly mean. Both the snapshot and the month-wise table are built from this,
-    so their numbers are identical and neither is exposed to daily-tick outliers."""
+    so their numbers are identical and neither is exposed to daily-tick outliers.
+    'obs' carries how many trading days backed each monthly point, and 'Last'
+    the date it came from - used to flag a still-incomplete final month."""
     d = dfg.copy()
     d["Period"] = d["Date"].dt.to_period("M")
+    g = d.sort_values("Date").groupby(["Period", "Index Name"])
     if month_end:
-        m = (
-            d.sort_values("Date")
-            .groupby(["Period", "Index Name"])[selected_col].last().reset_index()
-        )
+        m = g[selected_col].last().reset_index()
     else:
-        m = d.groupby(["Period", "Index Name"])[selected_col].mean().reset_index()
-    return m
+        m = g[selected_col].mean().reset_index()
+    meta = g.agg(obs=("Date", "size"), Last=("Date", "max")).reset_index()
+    return m.merge(meta, on=["Period", "Index Name"], how="left")
 
 
 def build_snapshot(monthly: pd.DataFrame, order, selected_col: str) -> pd.DataFrame:
@@ -178,10 +219,12 @@ def build_snapshot(monthly: pd.DataFrame, order, selected_col: str) -> pd.DataFr
         rows.append(
             {
                 "Index": idx,
+                "As of": sub["Last"].iloc[-1].date(),
                 "Current": cur,
                 "Average": avg,
                 "Median": med,
                 "% vs Median": (cur / med - 1) * 100,
+                "Months": len(s),
             }
         )
     return pd.DataFrame(rows)
@@ -223,6 +266,23 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
         use_container_width=True, hide_index=True,
     )
 
+    # Honest label on the newest month: if it is still being filled in, "Current"
+    # is a part-month reading sitting next to full-month history. Say so.
+    last_period = monthly["Period"].max()
+    tail = monthly[monthly["Period"] == last_period]
+    expected = len(pd.bdate_range(last_period.start_time, last_period.end_time))
+    if int(tail["obs"].max()) < expected - 3:
+        st.caption(
+            f"⚠️ {last_period.strftime('%b %Y')} is partial — "
+            f"{int(tail['obs'].max())} of ~{expected} trading days so far. "
+            "'Current' is a part-month reading."
+        )
+    else:
+        st.caption(
+            f"Latest complete month: **{last_period.strftime('%b %Y')}** "
+            f"({int(tail['obs'].max())} trading days)."
+        )
+
     st.divider()
 
     # --- month-wise table (same monthly series) ---
@@ -245,7 +305,8 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
 
 
 # --------------------------------------------------------------------------
-df, report = load_and_merge_data()
+_sig = file_signature(discover_files())
+df, report = load_and_merge_data(_sig)
 
 # --- SIDEBAR: files + overlap diagnostics ---------------------------------
 st.sidebar.markdown("**Files merged**")
@@ -255,7 +316,7 @@ for cap in report.get("captions", []):
 if df.empty:
     st.warning(
         "No valuation CSVs found. Place your `*_Historical_PE_PB_DIV_Data_*.csv` files "
-        "in the same folder as this script."
+        f"in the same folder as this script (`{SCRIPT_DIR}`)."
     )
     st.stop()
 
@@ -269,6 +330,15 @@ st.sidebar.markdown(
     f"**Coverage:** {df['Date'].min().date()} -> {df['Date'].max().date()}  "
     f"({len(BROAD_INDICES & set(df['Index Name']))} broad, {len(SECTOR_ORDER)} sectors)"
 )
+
+# Per-index freshness: the quickest check that every series really reaches the
+# newest month, rather than one lagging index hiding behind a global max date.
+st.sidebar.markdown("**Latest date per index**")
+latest = df.groupby("Index Name")["Date"].max().sort_values(ascending=False)
+overall = latest.max()
+for name, dt in latest.items():
+    flag = "" if dt == overall else f"  (lags by {(overall - dt).days}d)"
+    st.sidebar.caption(f"{name}: {dt.date()}{flag}")
 
 # Overlap panel.
 st.sidebar.markdown("**Overlap**")
