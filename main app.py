@@ -186,6 +186,34 @@ def load_and_merge_data(_sig: tuple):
 
 
 # ==========================================================================
+#  COVERAGE DIAGNOSTICS
+#  A merge of abutting exports can leave a HOLE: e.g. sector files ending
+#  Sep 2025 and resuming Aug 2026. The month-wise table lists only the months
+#  that exist, so a hole looks like continuous history, and Average / Median
+#  are then computed across a break. This reports, per index, any calendar
+#  month missing INSIDE that index's own first->last span.
+# ==========================================================================
+def month_coverage(dfg: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for name, g in dfg.groupby("Index Name"):
+        months = pd.PeriodIndex(g["Date"].dt.to_period("M").unique()).sort_values()
+        full = pd.period_range(months.min(), months.max(), freq="M")
+        missing = full.difference(months)
+        rows.append(
+            {
+                "Index": name,
+                "From": str(months.min()),
+                "To": str(months.max()),
+                "Months": len(months),
+                "Missing": len(missing),
+                "Gap months": ", ".join(str(p) for p in missing[:4])
+                + (" ..." if len(missing) > 4 else ""),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("Missing", ascending=False).reset_index(drop=True)
+
+
+# ==========================================================================
 #  ONE SHARED RENDERER - snapshot + month-wise table for any index group.
 # ==========================================================================
 def monthly_long(dfg: pd.DataFrame, selected_col: str, month_end: bool) -> pd.DataFrame:
@@ -283,6 +311,25 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
             f"({int(tail['obs'].max())} trading days)."
         )
 
+    # Uneven history depth: a median over 2 months and one over 30 are not
+    # comparable, so say so rather than letting the column imply they are.
+    if not snapshot.empty and snapshot["Months"].nunique() > 1:
+        st.caption(
+            f"'% vs Median' rests on {snapshot['Months'].min()}-{snapshot['Months'].max()} "
+            "months depending on the index - shallow histories are not comparable "
+            "with deep ones. See the 'Months' column."
+        )
+
+    # Holes inside an index's own span break Average / Median silently.
+    cov = month_coverage(dfg)
+    holed = cov[cov["Missing"] > 0]
+    if not holed.empty:
+        st.warning(
+            f"{len(holed)} index(es) have missing months inside their own history - "
+            "Average and Median are computed across the break."
+        )
+        st.dataframe(holed, use_container_width=True, hide_index=True)
+
     st.divider()
 
     # --- month-wise table (same monthly series) ---
@@ -331,14 +378,25 @@ st.sidebar.markdown(
     f"({len(BROAD_INDICES & set(df['Index Name']))} broad, {len(SECTOR_ORDER)} sectors)"
 )
 
-# Per-index freshness: the quickest check that every series really reaches the
-# newest month, rather than one lagging index hiding behind a global max date.
-st.sidebar.markdown("**Latest date per index**")
-latest = df.groupby("Index Name")["Date"].max().sort_values(ascending=False)
-overall = latest.max()
-for name, dt in latest.items():
-    flag = "" if dt == overall else f"  (lags by {(overall - dt).days}d)"
-    st.sidebar.caption(f"{name}: {dt.date()}{flag}")
+# Per-index freshness + holes in one table. With a dozen indices merged from
+# many exports, a single global max date hides both a lagging index and a gap.
+st.sidebar.markdown("**Coverage per index**")
+_cov = month_coverage(df)
+_latest = df.groupby("Index Name")["Date"].max()
+_overall = _latest.max()
+_cov["Lag (d)"] = _cov["Index"].map(lambda n: (_overall - _latest[n]).days)
+st.sidebar.dataframe(
+    _cov[["Index", "From", "To", "Months", "Missing", "Lag (d)"]],
+    use_container_width=True, hide_index=True, height=260,
+)
+_stale = _cov[_cov["Lag (d)"] > 0]
+_holed = _cov[_cov["Missing"] > 0]
+if not _stale.empty:
+    st.sidebar.caption(f"⚠️ {len(_stale)} index(es) do not reach {_overall.date()}.")
+if not _holed.empty:
+    st.sidebar.caption(f"⚠️ {len(_holed)} index(es) have gaps inside their history.")
+if _stale.empty and _holed.empty:
+    st.sidebar.caption("All indices current and gap-free.")
 
 # Overlap panel.
 st.sidebar.markdown("**Overlap**")
