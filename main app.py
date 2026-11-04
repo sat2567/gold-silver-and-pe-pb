@@ -235,6 +235,82 @@ def month_coverage(dfg: pd.DataFrame) -> pd.DataFrame:
 
 
 # ==========================================================================
+#  SOURCE-BREAK DETECTION
+#  A metric can STEP to a new level because the source changed how it is
+#  computed, not because the market moved. The giveaway is synchronicity: a
+#  real dividend or earnings event hits one index, a methodology change hits
+#  many on the same day. Left undetected, Average / Median / "% vs Median"
+#  are computed across two incompatible bases and the month-on-month change
+#  is an artifact.
+#
+#  Compares the median of the 5 sessions BEFORE a day with the median of the
+#  5 sessions FROM that day, so a sustained step is caught and a one-day tick
+#  is not. Nothing is corrected automatically - the break is reported and the
+#  decision (rebase, truncate, ignore) stays with you.
+# ==========================================================================
+BREAK_RATIO = 1.20     # >=20% sustained step in either direction
+BREAK_WINDOW = 5       # sessions compared on each side
+BREAK_MIN_INDICES = 2  # a same-day step in >=2 indices implies the source, not the market
+
+
+def detect_level_breaks(dfg: pd.DataFrame, col: str) -> pd.DataFrame:
+    rows = []
+    for name, g in dfg.sort_values("Date").groupby("Index Name"):
+        s = g.set_index("Date")[col].dropna()
+        if len(s) < BREAK_WINDOW * 2:
+            continue
+
+        # Any window straddling a step satisfies the test, so the raw scan
+        # flags a RUN of consecutive days around one break. Collect the run,
+        # then attribute the break to the single day whose own session-on-
+        # session move is largest - that is the day the level actually changed.
+        hits = []
+        for i in range(BREAK_WINDOW, len(s) - BREAK_WINDOW + 1):
+            before = s.iloc[i - BREAK_WINDOW:i].median()
+            after = s.iloc[i:i + BREAK_WINDOW].median()
+            if before <= 0:
+                continue
+            r = after / before
+            if r >= BREAK_RATIO or r <= 1 / BREAK_RATIO:
+                hits.append((i, before, after, r))
+        if not hits:
+            continue
+
+        run = [hits[0]]
+        for h in hits[1:]:
+            if h[0] == run[-1][0] + 1:
+                run.append(h)
+            else:
+                rows.append(_attribute_break(name, s, run))
+                run = [h]
+        rows.append(_attribute_break(name, s, run))
+
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    # Keep only days where several indices step together.
+    counts = out.groupby("Date")["Index"].nunique()
+    keep = counts[counts >= BREAK_MIN_INDICES].index
+    return out[out["Date"].isin(keep)].sort_values(["Date", "Index"]).reset_index(drop=True)
+
+
+def _attribute_break(name: str, s: pd.Series, run: list) -> dict:
+    """Pick the day inside a flagged run where the series actually stepped."""
+    best_i, best_move = run[0][0], -1.0
+    for i, _b, _a, _r in run:
+        prev, cur = s.iloc[i - 1], s.iloc[i]
+        if prev <= 0:
+            continue
+        move = abs(cur / prev - 1)
+        if move > best_move:
+            best_i, best_move = i, move
+    before = s.iloc[max(0, best_i - BREAK_WINDOW):best_i].median()
+    after = s.iloc[best_i:best_i + BREAK_WINDOW].median()
+    return {"Index": name, "Date": s.index[best_i], "Before": round(before, 3),
+            "After": round(after, 3), "Step": f"{after / before:.2f}x"}
+
+
+# ==========================================================================
 #  ONE SHARED RENDERER - snapshot + month-wise table for any index group.
 # ==========================================================================
 def monthly_long(dfg: pd.DataFrame, selected_col: str, month_end: bool) -> pd.DataFrame:
@@ -315,6 +391,23 @@ def render_group(dfg: pd.DataFrame, order, selected_col: str, metric_choice: str
         use_container_width=True, hide_index=True,
     )
 
+    # Source-level breaks in the SELECTED metric only, so this stays silent
+    # on the metrics that are unaffected.
+    breaks = detect_level_breaks(dfg, selected_col)
+    if not breaks.empty:
+        _days = breaks["Date"].dt.date.unique()
+        st.warning(
+            f"{metric_choice} steps to a new level on "
+            f"{', '.join(str(d) for d in _days)} across {breaks['Index'].nunique()} "
+            "indices at once - that pattern points to a change in how the source "
+            "computes it, not a market move. Average, Median and '% vs Median' "
+            "below span both bases."
+        )
+        st.dataframe(
+            breaks.assign(Date=lambda x: x["Date"].dt.date),
+            use_container_width=True, hide_index=True,
+        )
+
     # Holes inside an index's own span break Average / Median silently.
     cov = month_coverage(dfg)
     holed = cov[cov["Missing"] > 0]
@@ -389,8 +482,16 @@ _cov = month_coverage(df)
 _latest = df.groupby("Index Name")["Date"].max()
 _overall = _latest.max()
 _cov["Lag (d)"] = _cov["Index"].map(lambda n: (_overall - _latest[n]).days)
+# Trading days backing the newest month: a 2-day month sitting beside 21-day
+# months is the single easiest way to misread the top row of the table.
+_newest = df["Date"].dt.to_period("M").max()
+_days_newest = (
+    df[df["Date"].dt.to_period("M") == _newest].groupby("Index Name").size()
+)
+_cov[f"{_newest.strftime('%b')} days"] = _cov["Index"].map(_days_newest).fillna(0).astype(int)
 st.sidebar.dataframe(
-    _cov[["Index", "From", "To", "Months", "Missing", "Lag (d)"]],
+    _cov[["Index", "From", "To", "Months", "Missing", "Lag (d)",
+          f"{_newest.strftime('%b')} days"]],
     use_container_width=True, hide_index=True, height=260,
 )
 _stale = _cov[_cov["Lag (d)"] > 0]
