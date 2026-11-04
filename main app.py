@@ -21,6 +21,13 @@ BROAD_INDICES = set(BROAD_ORDER)
 # Rows before this date are dropped for the broad tab only; sectors are unaffected.
 BROAD_START = pd.Timestamp("2024-03-01")
 
+# Hard end of the analysis window, applied to BOTH tabs. An export usually runs
+# a few days into the next month, and those few sessions would otherwise become
+# a "month" of their own sitting on top of the table next to full months, with
+# "Current" reading off it. Set to the last day you want included, or to None
+# to use everything on disk. Bump this when you add next month's export.
+DATA_END = pd.Timestamp("2026-10-31")
+
 # Stray valuation files we never want to show (e.g. a duplicate SMALLCAP 100 export).
 IGNORE_INDICES = {"NIFTY SMALLCAP 100"}
 
@@ -468,11 +475,34 @@ if df.empty:
     )
     st.stop()
 
+# Apply the analysis-window cutoff before anything is computed, so the tables,
+# the snapshot, the coverage panel and the break scan all see the same window.
+_dropped_tail = 0
+_tail_max = None
+if DATA_END is not None:
+    _after = df["Date"] > DATA_END
+    _dropped_tail = int(_after.sum())
+    if _dropped_tail:
+        _tail_max = df.loc[_after, "Date"].max()
+    df = df[~_after].copy()
+    if df.empty:
+        st.warning(
+            f"DATA_END is set to {DATA_END.date()} but every row on disk is later "
+            "than that. Raise DATA_END (or set it to None) to see your data."
+        )
+        st.stop()
+
 # Partition into broad vs sector.
 df_broad = df[df["Index Name"].isin(BROAD_INDICES)].copy()
 df_broad = df_broad[df_broad["Date"] >= BROAD_START]  # floor broad tab at Mar 2024
 df_sector = df[~df["Index Name"].isin(BROAD_INDICES)].copy()
 SECTOR_ORDER = sorted(df_sector["Index Name"].unique())
+
+if _dropped_tail:
+    st.sidebar.caption(
+        f"Analysis window ends {DATA_END.date()} (DATA_END): "
+        f"{_dropped_tail} later row(s) held back, to {_tail_max.date()}."
+    )
 
 st.sidebar.markdown(
     f"**Coverage:** {df['Date'].min().date()} -> {df['Date'].max().date()}  "
